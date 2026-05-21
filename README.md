@@ -1,4 +1,4 @@
-Absolutely. Here’s the rewritten version as **one coherent website page**, with the SQL argument as the spine and versioning baked into the model instead of bolted on.
+`Absolutely. Here’s the rewritten version as **one coherent website page**, with the SQL argument as the spine and versioning baked into the model instead of bolted on.`:
 
 ---
 
