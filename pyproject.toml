@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sql-id-layout-registry"
+version = "0.1.0"
+description = "Layout-registry driven SQL integer public ID encoder/decoder"
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [{name = "XCTX"}]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Security :: Cryptography",
+]
+
+[tool.setuptools]
+py-modules = ["sql_id_library"]
