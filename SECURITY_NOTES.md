@@ -200,11 +200,12 @@ For bearer-token uses, generate independent random tokens of at least 128 bits.
 - `validate_hex()` validates only label `0`.
 - `validate_hex_label()` validates only one expected label.
 - `inspect_hex()` returns diagnostic metadata for any non-reserved label.
-- `configure_sql_id_labels()` replaces the full local label registry at once.
+- `configure_sql_id_labels()` validates the full local label registry before atomically replacing it.
 - `load_sql_id_labels_from_file()` loads `.json`, `.yaml`, or `.yml` label mappings.
 - YAML loading requires optional PyYAML; unavailable YAML support raises `ValueError`.
 - Same-stem JSON/YAML files are cross-checked and must match exactly after normalization.
 - Label config files larger than 2000 bytes are rejected.
+- Duplicate JSON/YAML keys, duplicate normalized names, duplicate IDs, and YAML bool label IDs are rejected.
 - ID `0` is always invalid.
 - Accepted SQL IDs are `1..(2^32 - 1)`.
 - The raw all-ones ID-index state is rejected.

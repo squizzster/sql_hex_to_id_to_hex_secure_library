@@ -13,6 +13,7 @@ from __future__ import annotations
 import os
 import re
 import unittest
+import builtins
 from contextlib import contextmanager
 from pathlib import Path
 from unittest import mock
@@ -167,6 +168,9 @@ class SqlIdLibraryTests(unittest.TestCase):
         sid.configure_sql_id_labels({"users": 1, "Plans": 2})
         self.assertEqual(sid.available_labels(), {"users": 1, "plans": 2})
         self.assertEqual(sid.hex_to_id_label(sid.id_to_hex_label(1, "users"), "users"), 1)
+        copied = sid.available_labels()
+        copied["evil"] = 30
+        self.assertEqual(sid.available_labels(), {"users": 1, "plans": 2})
 
         invalid_registries: list[object] = [
             None,
@@ -187,6 +191,7 @@ class SqlIdLibraryTests(unittest.TestCase):
             with self.subTest(labels=repr(labels)):
                 with self.assertRaises(ValueError):
                     sid.configure_sql_id_labels(labels)  # type: ignore[arg-type]
+                self.assertEqual(sid.available_labels(), {"users": 1, "plans": 2})
 
     def test_load_sql_id_labels_from_json_file(self) -> None:
         sid.load_sql_id_labels_from_file(TEST_DIR / "test_sql_id_labels.json")
@@ -226,15 +231,74 @@ class SqlIdLibraryTests(unittest.TestCase):
         self.assertIsNone(sid.hex_to_id_label(encoded, "repair"))
 
     def test_load_sql_id_labels_from_file_rejects_bad_inputs(self) -> None:
+        sid.configure_sql_id_labels({"users": 1})
         bad_json_path = TEST_DIR / "bad_sql_id_labels.json"
         bad_json_path.write_text("[1, 2, 3]", encoding="utf-8")
         try:
             with self.assertRaises(ValueError):
                 sid.load_sql_id_labels_from_file(bad_json_path)
+            self.assertEqual(sid.available_labels(), {"users": 1})
             with self.assertRaises(ValueError):
                 sid.load_sql_id_labels_from_file(TEST_DIR / "missing.sqlid")
+            self.assertEqual(sid.available_labels(), {"users": 1})
         finally:
             bad_json_path.unlink(missing_ok=True)
+
+    def test_load_sql_id_labels_from_json_rejects_duplicate_keys_and_names(self) -> None:
+        duplicate_key_path = TEST_DIR / "duplicate_key_sql_id_labels.json"
+        duplicate_name_path = TEST_DIR / "duplicate_name_sql_id_labels.json"
+        duplicate_key_path.write_text('{"plan": 1, "plan": 2}\n', encoding="utf-8")
+        duplicate_name_path.write_text('{"1": "plan", "2": "PLAN"}\n', encoding="utf-8")
+        try:
+            with self.assertRaises(ValueError):
+                sid.load_sql_id_labels_from_file(duplicate_key_path)
+            with self.assertRaises(ValueError):
+                sid.load_sql_id_labels_from_file(duplicate_name_path)
+        finally:
+            duplicate_key_path.unlink(missing_ok=True)
+            duplicate_name_path.unlink(missing_ok=True)
+
+    def test_load_sql_id_labels_from_yaml_rejects_duplicate_keys_names_and_bool_keys(self) -> None:
+        try:
+            import yaml  # noqa: F401
+        except ImportError:
+            self.skipTest("PyYAML is not installed")
+
+        duplicate_key_path = TEST_DIR / "duplicate_key_sql_id_labels.yaml"
+        duplicate_name_path = TEST_DIR / "duplicate_name_sql_id_labels.yaml"
+        bool_key_path = TEST_DIR / "bool_key_sql_id_labels.yaml"
+        duplicate_key_path.write_text("1: dry_run\n1: plan\n", encoding="utf-8")
+        duplicate_name_path.write_text("1: plan\n2: PLAN\n", encoding="utf-8")
+        bool_key_path.write_text("true: dry_run\n", encoding="utf-8")
+        try:
+            with self.assertRaises(ValueError):
+                sid.load_sql_id_labels_from_file(duplicate_key_path)
+            with self.assertRaises(ValueError):
+                sid.load_sql_id_labels_from_file(duplicate_name_path)
+            with self.assertRaises(ValueError):
+                sid.load_sql_id_labels_from_file(bool_key_path)
+        finally:
+            duplicate_key_path.unlink(missing_ok=True)
+            duplicate_name_path.unlink(missing_ok=True)
+            bool_key_path.unlink(missing_ok=True)
+
+    def test_load_sql_id_labels_from_yaml_errors_when_yaml_dependency_is_missing(self) -> None:
+        yaml_path = TEST_DIR / "no_yaml_dependency_sql_id_labels.yaml"
+        yaml_path.write_text("1: dry_run\n", encoding="utf-8")
+
+        real_import = builtins.__import__
+
+        def fake_import(name: str, *args: object, **kwargs: object) -> object:
+            if name == "yaml":
+                raise ImportError("blocked for test")
+            return real_import(name, *args, **kwargs)
+
+        try:
+            with mock.patch("builtins.__import__", side_effect=fake_import):
+                with self.assertRaises(ValueError):
+                    sid.load_sql_id_labels_from_file(yaml_path)
+        finally:
+            yaml_path.unlink(missing_ok=True)
 
     def test_load_sql_id_labels_from_file_requires_same_stem_files_to_match(self) -> None:
         json_path = TEST_DIR / "mismatch_sql_id_labels.json"
@@ -258,6 +322,16 @@ class SqlIdLibraryTests(unittest.TestCase):
                 sid.load_sql_id_labels_from_file(large_path)
         finally:
             large_path.unlink(missing_ok=True)
+
+    def test_load_sql_id_labels_from_file_accepts_exactly_2000_bytes(self) -> None:
+        exact_path = TEST_DIR / "exact_size_sql_id_labels.json"
+        payload = '{"dry_run": 1}'
+        exact_path.write_text(payload + (" " * (2000 - len(payload))), encoding="utf-8")
+        try:
+            sid.load_sql_id_labels_from_file(exact_path)
+            self.assertEqual(sid.available_labels(), {"dry_run": 1})
+        finally:
+            exact_path.unlink(missing_ok=True)
 
     def test_invalid_label_inputs_fail_closed(self) -> None:
         public_hex = self.assert_public_hex(sid.id_to_hex_label(1, 1))

@@ -118,7 +118,8 @@ requires PyYAML; if it is unavailable, loading a YAML file raises `ValueError`.
 If same-stem files both exist, for example `test_sql_id_labels.json` and
 `test_sql_id_labels.yaml`, the loader reads both and refuses to continue unless
 they normalize to exactly the same label registry. Each label file must be
-`2000` bytes or smaller.
+`2000` bytes or smaller. Duplicate file keys, duplicate normalized label names,
+duplicate label IDs, and YAML boolean label IDs are rejected.
 
 Supported file shapes:
 

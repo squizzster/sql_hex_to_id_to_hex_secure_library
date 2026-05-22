@@ -82,6 +82,8 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
+from threading import RLock
+from types import MappingProxyType
 from typing import Final
 
 
@@ -237,8 +239,9 @@ _MAX_PUBLIC_HEX_CHARS: Final[int] = HEX_CHARS
 _MAX_DECIMAL_ID_STRING_CHARS: Final[int] = 32
 _MAX_LABEL_FILE_BYTES: Final[int] = 2000
 
-_LABELS_BY_NAME: dict[str, int] = {}
-_LABEL_NAMES_BY_ID: dict[int, str] = {}
+_LABEL_LOCK = RLock()
+_LABELS_BY_NAME: Mapping[str, int] = MappingProxyType({})
+_LABEL_NAMES_BY_ID: Mapping[int, str] = MappingProxyType({})
 
 __all__ = [
     "ACTIVE_DECODE_VERSIONS",
@@ -389,25 +392,22 @@ def _coerce_label(label: object, *, allow_zero: bool) -> int:
     """Resolve an int label id or configured label name into label bits."""
     if isinstance(label, str):
         normalized = _normalize_label_name(label)
-        try:
-            return _LABELS_BY_NAME[normalized]
-        except KeyError as exc:
-            raise _InputError(f"unknown SQL ID label: {label!r}") from exc
+        with _LABEL_LOCK:
+            label_id = _LABELS_BY_NAME.get(normalized)
+        if label_id is None:
+            raise _InputError(f"unknown SQL ID label: {label!r}")
+        return label_id
     return _validate_label_id(label, allow_zero=allow_zero)
 
 
-def configure_sql_id_labels(labels: Mapping[str, int]) -> None:
-    """Configure local names for label IDs 1..30.
-
-    This lookup is local metadata only. The public ID stores the numeric label
-    bits, not the label name. Configure labels once during application startup.
-    """
+def _validated_label_maps(labels: Mapping[str, int]) -> tuple[dict[str, int], dict[int, str]]:
+    """Validate label mappings and return normalized forward/reverse maps."""
     if not isinstance(labels, Mapping):
         raise ValueError("labels must be a mapping of name -> label id")
 
     by_name: dict[str, int] = {}
     by_id: dict[int, str] = {}
-    for raw_name, raw_id in labels.items():
+    for raw_name, raw_id in tuple(labels.items()):
         if not isinstance(raw_name, str):
             raise ValueError("label names must be strings")
         try:
@@ -422,10 +422,56 @@ def configure_sql_id_labels(labels: Mapping[str, int]) -> None:
         by_name[name] = label_id
         by_id[label_id] = name
 
-    _LABELS_BY_NAME.clear()
-    _LABELS_BY_NAME.update(by_name)
-    _LABEL_NAMES_BY_ID.clear()
-    _LABEL_NAMES_BY_ID.update(by_id)
+    return by_name, by_id
+
+
+def configure_sql_id_labels(labels: Mapping[str, int]) -> None:
+    """Configure local names for label IDs 1..30.
+
+    This lookup is local metadata only. The public ID stores the numeric label
+    bits, not the label name. Configure labels once during application startup.
+    """
+    global _LABELS_BY_NAME, _LABEL_NAMES_BY_ID
+
+    by_name, by_id = _validated_label_maps(labels)
+    with _LABEL_LOCK:
+        _LABELS_BY_NAME = MappingProxyType(by_name)
+        _LABEL_NAMES_BY_ID = MappingProxyType(by_id)
+
+
+def _reject_duplicate_json_pairs(pairs: list[tuple[object, object]]) -> dict[object, object]:
+    """JSON object hook that refuses duplicate keys instead of keeping the last."""
+    result: dict[object, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate key in JSON label file: {key!r}")
+        result[key] = value
+    return result
+
+
+def _yaml_safe_load_no_duplicate_keys(yaml_module: object, text: str) -> object:
+    """Load YAML with duplicate mapping keys rejected."""
+    safe_loader = yaml_module.SafeLoader  # type: ignore[attr-defined]
+    mapping_node = yaml_module.MappingNode  # type: ignore[attr-defined]
+    default_mapping_tag = yaml_module.resolver.BaseResolver.DEFAULT_MAPPING_TAG  # type: ignore[attr-defined]
+    yaml_load = yaml_module.load  # type: ignore[attr-defined]
+
+    class UniqueKeyLoader(safe_loader):  # type: ignore[valid-type,misc]
+        pass
+
+    def construct_mapping(loader: object, node: object, deep: bool = False) -> dict[object, object]:
+        if not isinstance(node, mapping_node):
+            raise ValueError("label file must contain a YAML mapping")
+        mapping: dict[object, object] = {}
+        for key_node, value_node in node.value:  # type: ignore[attr-defined]
+            key = loader.construct_object(key_node, deep=deep)  # type: ignore[attr-defined]
+            if key in mapping:
+                raise ValueError(f"duplicate key in YAML label file: {key!r}")
+            mapping[key] = loader.construct_object(value_node, deep=deep)  # type: ignore[attr-defined]
+        return mapping
+
+    UniqueKeyLoader.add_constructor(default_mapping_tag, construct_mapping)
+    return yaml_load(text, Loader=UniqueKeyLoader)
 
 
 def _labels_from_loaded_data(data: object) -> dict[str, int]:
@@ -434,9 +480,11 @@ def _labels_from_loaded_data(data: object) -> dict[str, int]:
         raise ValueError("label file must contain a mapping")
 
     labels: dict[str, int] = {}
+    seen_ids: dict[int, str] = {}
     for raw_key, raw_value in data.items():
         if (
-            (isinstance(raw_key, str) and raw_key.isdecimal()) or isinstance(raw_key, int)
+            (isinstance(raw_key, str) and raw_key.isdecimal())
+            or (isinstance(raw_key, int) and not isinstance(raw_key, bool))
         ) and isinstance(raw_value, str):
             name = raw_value
             label_id = int(raw_key)
@@ -445,7 +493,17 @@ def _labels_from_loaded_data(data: object) -> dict[str, int]:
             label_id = raw_value
         if not isinstance(name, str):
             raise ValueError("label file names must be strings")
-        labels[name] = label_id
+        try:
+            normalized_name = _normalize_label_name(name)
+            validated_id = _validate_label_id(label_id, allow_zero=False)
+        except _InputError as exc:
+            raise ValueError(str(exc)) from exc
+        if normalized_name in labels:
+            raise ValueError(f"duplicate label name after normalization: {name!r}")
+        if validated_id in seen_ids:
+            raise ValueError(f"duplicate label id: {validated_id}")
+        labels[normalized_name] = validated_id
+        seen_ids[validated_id] = normalized_name
     return labels
 
 
@@ -469,18 +527,22 @@ def _load_one_label_file(path: Path) -> dict[str, int]:
     """Load one label file, enforce size, and return a normalized mapping."""
     suffix = path.suffix.lower()
     try:
-        if path.stat().st_size > _MAX_LABEL_FILE_BYTES:
+        with path.open("rb") as file_obj:
+            raw_data = file_obj.read(_MAX_LABEL_FILE_BYTES + 1)
+        if len(raw_data) > _MAX_LABEL_FILE_BYTES:
             raise ValueError(f"label file is too large; maximum is {_MAX_LABEL_FILE_BYTES} bytes")
+        try:
+            text = raw_data.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise ValueError(f"label file must be valid UTF-8: {exc}") from exc
         if suffix == ".json":
-            with path.open("r", encoding="utf-8") as file_obj:
-                data = json.load(file_obj)
+            data = json.loads(text, object_pairs_hook=_reject_duplicate_json_pairs)
         elif suffix in {".yaml", ".yml"}:
             try:
                 import yaml  # type: ignore[import-not-found]
             except ImportError as exc:
                 raise ValueError("YAML label files require the optional PyYAML package") from exc
-            with path.open("r", encoding="utf-8") as file_obj:
-                data = yaml.safe_load(file_obj)
+            data = _yaml_safe_load_no_duplicate_keys(yaml, text)
         else:
             raise ValueError("label file must use .json, .yaml, or .yml")
     except OSError as exc:
@@ -488,14 +550,8 @@ def _load_one_label_file(path: Path) -> dict[str, int]:
     except json.JSONDecodeError as exc:
         raise ValueError(f"invalid JSON label file: {exc}") from exc
 
-    labels = _labels_from_loaded_data(data)
-    # Reuse the public validator on a temporary copy before returning.
-    old_labels = available_labels()
-    try:
-        configure_sql_id_labels(labels)
-        return available_labels()
-    finally:
-        configure_sql_id_labels(old_labels)
+    by_name, _by_id = _validated_label_maps(_labels_from_loaded_data(data))
+    return by_name
 
 
 def load_sql_id_labels_from_file(path: str | os.PathLike[str]) -> None:
@@ -522,17 +578,22 @@ def load_sql_id_labels_from_file(path: str | os.PathLike[str]) -> None:
 
 def clear_sql_id_labels() -> None:
     """Clear the local label-name lookup."""
-    _LABELS_BY_NAME.clear()
-    _LABEL_NAMES_BY_ID.clear()
+    global _LABELS_BY_NAME, _LABEL_NAMES_BY_ID
+
+    with _LABEL_LOCK:
+        _LABELS_BY_NAME = MappingProxyType({})
+        _LABEL_NAMES_BY_ID = MappingProxyType({})
 
 
 def available_labels() -> dict[str, int]:
     """Return a copy of the configured local label-name lookup."""
-    return dict(_LABELS_BY_NAME)
+    with _LABEL_LOCK:
+        return dict(_LABELS_BY_NAME)
 
 
 def _label_name_for_id(label_id: int) -> str | None:
-    return _LABEL_NAMES_BY_ID.get(label_id)
+    with _LABEL_LOCK:
+        return _LABEL_NAMES_BY_ID.get(label_id)
 
 
 def _password_bytes() -> bytes:
