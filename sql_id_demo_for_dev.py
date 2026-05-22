@@ -93,7 +93,7 @@ def build_parser() -> argparse.ArgumentParser:
             "  ./sql_id_demo_for_dev.py\n"
             "  ./sql_id_demo_for_dev.py --int_id 1\n"
             "  ./sql_id_demo_for_dev.py --int_id 1 --label users\n"
-            "  ./sql_id_demo_for_dev.py --labels-file ./test_sql_id_labels.yaml --int_id 1 --label repair\n"
+            "  ./sql_id_demo_for_dev.py --labels-file ./conf/test_sql_id_labels.yaml --int_id 1 --label repair\n"
             "  ./sql_id_demo_for_dev.py --hex_id 65a5cb411fa554a0\n"
             "  ./sql_id_demo_for_dev.py --hex_id 65a5cb411fa554a0 --label users\n"
             "  ./sql_id_demo_for_dev.py --strict-config --int_id 1\n\n"
@@ -226,7 +226,7 @@ def show_default_demo() -> None:
     print("------------")
     print("  ./sql_id_demo_for_dev.py --int_id 1")
     print("  ./sql_id_demo_for_dev.py --int_id 1 --label users")
-    print("  ./sql_id_demo_for_dev.py --labels-file ./test_sql_id_labels.yaml --int_id 1 --label repair")
+    print("  ./sql_id_demo_for_dev.py --labels-file ./conf/test_sql_id_labels.yaml --int_id 1 --label repair")
     print("  ./sql_id_demo_for_dev.py --hex_id \"<public_hex>\"")
     print("  ./sql_id_demo_for_dev.py --hex_id \"<public_hex>\" --label users")
     print("  ./sql_id_demo_for_dev.py --help")

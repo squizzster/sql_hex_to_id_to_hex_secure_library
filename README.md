@@ -109,15 +109,15 @@ Or load labels from a file:
 ```python
 from sql_id_library import load_sql_id_labels_from_file
 
-load_sql_id_labels_from_file("./test_sql_id_labels.json")
-load_sql_id_labels_from_file("./test_sql_id_labels.yaml")
+load_sql_id_labels_from_file("./conf/test_sql_id_labels.json")
+load_sql_id_labels_from_file("./conf/test_sql_id_labels.yaml")
 ```
 
 JSON support uses the Python standard library. YAML support is optional and
 requires PyYAML; if it is unavailable, loading a YAML file raises `ValueError`.
-If same-stem files both exist, for example `test_sql_id_labels.json` and
-`test_sql_id_labels.yaml`, the loader reads both and refuses to continue unless
-they normalize to exactly the same label registry. Each label file must be
+If same-stem files both exist, for example `conf/test_sql_id_labels.json` and
+`conf/test_sql_id_labels.yaml`, the loader reads both and refuses to continue
+unless they normalize to exactly the same label registry. Each label file must be
 `2000` bytes or smaller. Duplicate file keys, duplicate normalized label names,
 duplicate label IDs, and YAML boolean label IDs are rejected.
 
@@ -325,7 +325,7 @@ It does not mean access granted.
 ./sql_id_demo_for_dev.py
 ./sql_id_demo_for_dev.py --int_id 1
 ./sql_id_demo_for_dev.py --int_id 1 --label users
-./sql_id_demo_for_dev.py --labels-file ./test_sql_id_labels.yaml --int_id 1 --label repair
+./sql_id_demo_for_dev.py --labels-file ./conf/test_sql_id_labels.yaml --int_id 1 --label repair
 ./sql_id_demo_for_dev.py --hex_id "<public_hex>"
 ./sql_id_demo_for_dev.py --hex_id "<public_hex>" --label users
 ```

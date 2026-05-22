@@ -22,6 +22,7 @@ from unittest import mock
 TEST_PASSWORD = "unit-test-secret-" + ("0123456789abcdef" * 4)
 OTHER_TEST_PASSWORD = "different-test-secret-" + ("fedcba9876543210" * 4)
 TEST_DIR = Path(__file__).resolve().parent
+TEST_CONF_DIR = TEST_DIR / "conf"
 os.environ.setdefault("XCTX_ID_PASSWORD", TEST_PASSWORD)
 
 import sql_id_library as sid  # noqa: E402  - env default is set before import
@@ -194,7 +195,7 @@ class SqlIdLibraryTests(unittest.TestCase):
                 self.assertEqual(sid.available_labels(), {"users": 1, "plans": 2})
 
     def test_load_sql_id_labels_from_json_file(self) -> None:
-        sid.load_sql_id_labels_from_file(TEST_DIR / "test_sql_id_labels.json")
+        sid.load_sql_id_labels_from_file(TEST_CONF_DIR / "test_sql_id_labels.json")
         self.assertEqual(
             sid.available_labels(),
             {
@@ -215,7 +216,7 @@ class SqlIdLibraryTests(unittest.TestCase):
         except ImportError:
             self.skipTest("PyYAML is not installed")
 
-        sid.load_sql_id_labels_from_file(TEST_DIR / "test_sql_id_labels.yaml")
+        sid.load_sql_id_labels_from_file(TEST_CONF_DIR / "test_sql_id_labels.yaml")
         self.assertEqual(
             sid.available_labels(),
             {
