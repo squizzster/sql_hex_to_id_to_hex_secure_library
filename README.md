@@ -121,9 +121,11 @@ unless they normalize to exactly the same label registry. Each label file must b
 `2000` bytes or smaller. Duplicate file keys, duplicate normalized label names,
 duplicate label IDs, and YAML boolean label IDs are rejected.
 
-File-loaded labels are cached after the first successful load, which is the
-right default for long-running tasks. If application logic intentionally needs
-to re-read label files from disk, call:
+File-loaded labels are cached automatically after the first successful load.
+Later calls to `load_sql_id_labels_from_file()` for the same same-stem path
+reuse the cached registry and do not re-read disk. Encoding and decoding use the
+in-memory registry only. If application logic intentionally needs to re-read
+label files from disk, call:
 
 ```python
 from sql_id_library import reload_sql_id_labels_from_file

@@ -587,9 +587,10 @@ def load_sql_id_labels_from_file(path: str | os.PathLike[str]) -> None:
     and must normalize to the same label registry. Each file must be no larger
     than 2000 bytes.
 
-    File content is cached by same-stem path after the first successful load.
-    Use reload_sql_id_labels_from_file() when application logic intentionally
-    wants to re-read label files from disk.
+    File content is cached automatically by same-stem path after the first
+    successful load. Later calls for the same cache key reuse the cached
+    registry. Use reload_sql_id_labels_from_file() when application logic
+    intentionally wants to re-read label files from disk.
     """
     label_path = Path(path)
     cache_key = _label_file_cache_key(label_path)

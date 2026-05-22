@@ -201,7 +201,8 @@ For bearer-token uses, generate independent random tokens of at least 128 bits.
 - `validate_hex_label()` validates only one expected label.
 - `inspect_hex()` returns diagnostic metadata for any non-reserved label.
 - `configure_sql_id_labels()` validates the full local label registry before atomically replacing it.
-- `load_sql_id_labels_from_file()` loads and then caches `.json`, `.yaml`, or `.yml` label mappings.
+- `load_sql_id_labels_from_file()` automatically reuses cached `.json`, `.yaml`, or `.yml` label mappings after the first successful load for a same-stem path.
+- Encoding and decoding use the in-memory label registry only; normal ID operations do not read label config files.
 - Cached file loads and registry installs are protected by the same lock.
 - `reload_sql_id_labels_from_file()` explicitly re-reads files and refreshes the cache.
 - `re_load_sql_id_labels_from_file()` is an alias for explicit application-controlled reloads.
