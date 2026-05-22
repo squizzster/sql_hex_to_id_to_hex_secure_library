@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Developer demo and tiny CLI for sql_id_library.py.
+"""Developer demo CLI for sql_id_library.py.
 
 Run:
     ./bin_demo/sql_id_demo_for_dev.py
@@ -7,7 +7,7 @@ Run:
     ./bin_demo/sql_id_demo_for_dev.py --int_id 1 --label users
     ./bin_demo/sql_id_demo_for_dev.py --hex_id 65a5cb411fa554a0
 
-For real applications, set XCTX_ID_PASSWORD yourself with a strong secret:
+For real applications, set XCTX_ID_PASSWORD with a strong secret:
     export XCTX_ID_PASSWORD="$(python -c 'import secrets; print(secrets.token_hex(32))')"
 """
 
@@ -109,9 +109,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     action = parser.add_mutually_exclusive_group()
     action.add_argument("--int_id", type=int, help="encode this positive SQL integer ID and print public hex")
-    action.add_argument("--hex_id", help="decode and validate this public hex ID and print the SQL integer ID")
-    parser.add_argument("--label", help="use this expected label name or numeric label id")
-    parser.add_argument("--labels-file", help="load label names from this .json, .yaml, or .yml file")
+    action.add_argument("--hex_id", help="strictly decode this public hex ID and print the SQL integer ID")
+    parser.add_argument("--label", help="label name or numeric label id to encode with, or to require when decoding")
+    parser.add_argument("--labels-file", help="configure labels from this .json, .yaml, or .yml file")
     parser.add_argument(
         "--strict-config",
         action="store_true",
@@ -158,7 +158,7 @@ def print_config_note() -> None:
     print(f"Configured: {is_configured()}")
     if USING_DEMO_HARD_CODED_PASSWORD:
         print(f"Using DEMO_HARD_CODED_PASSWORD for {ENV_PASSWORD_NAME}.")
-        print("Real apps should set a stable secret in the process environment.")
+        print("Real applications should set a stable secret in the process environment.")
     print()
 
 
@@ -178,7 +178,7 @@ def show_default_demo() -> None:
     print("What this library does")
     print("----------------------")
     print("Turns positive SQL integer IDs into deterministic 16-character public hex handles.")
-    print("Label 0 is ordinary/unlabeled. Labels 1..30 are explicit typed handles.")
+    print("Label 0 is unlabeled. Labels 1..30 are explicit typed handles.")
     print("It is not an auth token; decode first, then apply normal authorization rules.")
     print()
 

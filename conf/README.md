@@ -21,9 +21,10 @@ load_sql_id_labels_from_file("./conf/test_sql_id_labels.json")
 load_sql_id_labels_from_file("./conf/test_sql_id_labels.yaml")
 ```
 
-If same-stem JSON and YAML files both exist, they must normalize to the same
-label registry or loading fails. JSON is supported by the Python standard
-library. YAML requires optional PyYAML.
+If same-stem files exist in more than one supported format, every available
+same-stem `.json`, `.yaml`, and `.yml` file must normalize to the same label
+registry or loading fails. JSON is supported by the Python standard library.
+YAML requires optional PyYAML.
 
 File-loaded labels are cached automatically after the first successful load.
 Later calls to `load_sql_id_labels_from_file()` for the same same-stem path

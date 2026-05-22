@@ -1,12 +1,13 @@
 """Reversible 16-hex-character public IDs for SQL integer keys.
 
-This module turns a positive SQL integer ID into a deterministic public hex ID,
-and turns a valid public hex ID back into the original integer. The public ID is
+This module turns a positive SQL integer ID, with optional label bits, into a
+deterministic public hex ID. It turns a valid public hex ID back into the
+original integer only through the exact expected-label decoder. The public ID is
 always 16 lowercase hex characters:
 
     3 version bits + 5 label bits + 32 id bits + 24 keyed tag bits = 64 bits
 
-Label ``0`` is the ordinary unlabeled mode used by ``id_to_hex()`` and
+Label ``0`` is the unlabeled mode used by ``id_to_hex()`` and
 ``hex_to_id()``. Labels ``1..30`` are typed/table/bucket labels used only by the
 explicit labeled API. Label ``31`` is reserved.
 
@@ -31,7 +32,8 @@ Strict decoder probability:
     The integer-returning APIs always check one exact expected label:
 
         hex_to_id(public_hex)                 expects label 0
-        hex_to_id_label(public_hex, label)    expects labels 1..30
+        hex_to_id_label(public_hex, label)    expects the supplied label,
+                                              which must resolve to 1..30
 
     For one expected label, random-valid probability is:
 
@@ -61,7 +63,7 @@ Operational hardening:
         10 * 2 * 24 * 365 = 175_200 guesses/year/bucket
 
     For strict expected-label decoding, random-valid odds are just under 2**-32,
-    so the worst-case expected time to hit any syntactically valid public ID is:
+    so the worst-case expected time to hit any decoder-valid public ID is:
 
         2**32 / 175_200 ~= 24_515 years/bucket
 
@@ -360,7 +362,7 @@ def _registry_is_sane() -> bool:
     return True
 
 
-# Backwards-readable name for tests and users who introspect internals.
+# Readable internal alias for tests and users who introspect internals.
 def _constants_are_sane() -> bool:
     """Return True when constants and the fixed layout are valid."""
     return _registry_is_sane()
@@ -432,7 +434,8 @@ def configure_sql_id_labels(labels: Mapping[str, int]) -> None:
     """Configure local names for label IDs 1..30.
 
     This lookup is local metadata only. The public ID stores the numeric label
-    bits, not the label name. Configure labels once during application startup.
+    bits, not the label name. Configure labels during application startup or
+    an explicit application-controlled reload.
     """
     global _LABELS_BY_NAME, _LABEL_NAMES_BY_ID
 
@@ -511,7 +514,7 @@ def _labels_from_loaded_data(data: object) -> dict[str, int]:
 
 
 def _candidate_label_paths(path: Path) -> tuple[Path, ...]:
-    """Return existing same-stem JSON/YAML label files for comparison."""
+    """Return existing same-stem .json/.yaml/.yml label files for comparison."""
     suffix = path.suffix.lower()
     if suffix not in {".json", ".yaml", ".yml"}:
         raise ValueError("label file must use .json, .yaml, or .yml")
@@ -527,7 +530,7 @@ def _candidate_label_paths(path: Path) -> tuple[Path, ...]:
 
 
 def _label_file_cache_key(path: Path) -> Path:
-    """Return the same cache key for same-stem JSON/YAML label files."""
+    """Return the same cache key for same-stem .json/.yaml/.yml label files."""
     if path.suffix.lower() not in {".json", ".yaml", ".yml"}:
         raise ValueError("label file must use .json, .yaml, or .yml")
     return path.expanduser().resolve().with_suffix("")
@@ -575,7 +578,7 @@ def _load_sql_id_label_files_uncached(label_path: Path) -> dict[str, int]:
 
 
 def load_sql_id_labels_from_file(path: str | os.PathLike[str]) -> None:
-    """Load cached label names from JSON/YAML files and configure them.
+    """Configure label names from cached or newly loaded .json/.yaml/.yml files.
 
     JSON support uses the Python standard library. YAML support is optional and
     requires PyYAML to be installed. Supported mapping shapes are:
@@ -583,9 +586,9 @@ def load_sql_id_labels_from_file(path: str | os.PathLike[str]) -> None:
         {"dry_run": 1, "plan": 2}
         {"1": "dry_run", "2": "plan"}
 
-    If same-stem JSON and YAML files both exist, all available files are loaded
-    and must normalize to the same label registry. Each file must be no larger
-    than 2000 bytes.
+    If same-stem files exist in more than one supported format, all available
+    .json, .yaml, and .yml files are loaded and must normalize to the same
+    label registry. Each file must be no larger than 2000 bytes.
 
     File content is cached automatically by same-stem path after the first
     successful load. Later calls for the same cache key reuse the cached
@@ -604,7 +607,7 @@ def load_sql_id_labels_from_file(path: str | os.PathLike[str]) -> None:
 
 
 def reload_sql_id_labels_from_file(path: str | os.PathLike[str]) -> None:
-    """Re-read label names from disk, refresh the cache, and configure them."""
+    """Re-read same-stem label files, refresh the cache, and configure them."""
     label_path = Path(path)
     cache_key = _label_file_cache_key(label_path)
     loaded_labels = _load_sql_id_label_files_uncached(label_path)
@@ -620,7 +623,7 @@ def re_load_sql_id_labels_from_file(path: str | os.PathLike[str]) -> None:
 
 
 def clear_sql_id_labels() -> None:
-    """Clear the local label-name lookup."""
+    """Clear the local label-name lookup and cached file-loaded labels."""
     global _LABELS_BY_NAME, _LABEL_NAMES_BY_ID
 
     with _LABEL_LOCK:
@@ -697,7 +700,7 @@ def is_configured() -> bool:
 
 
 def _coerce_id(value: object, layout: SqlIdLayout = DEFAULT_LAYOUT) -> int:
-    """Strictly coerce a public input into an integer SQL ID."""
+    """Strictly coerce caller input into an integer SQL ID."""
     if isinstance(value, bool):
         raise _InputError("bool is not an id")
     if isinstance(value, int):
@@ -727,7 +730,7 @@ def _round_function(right: int, key: bytes, layout: SqlIdLayout) -> int:
 
 
 def _feistel_encrypt(value: int, round_keys: tuple[bytes, ...], layout: SqlIdLayout = DEFAULT_LAYOUT) -> int:
-    """Encrypt one layout-width integer using the secret-derived Feistel PRP."""
+    """Apply the secret-derived Feistel permutation to one layout-width integer."""
     if not 0 <= value <= layout.value_mask:
         raise ValueError("value is outside layout range")
 
@@ -741,7 +744,7 @@ def _feistel_encrypt(value: int, round_keys: tuple[bytes, ...], layout: SqlIdLay
 
 
 def _feistel_decrypt(value: int, round_keys: tuple[bytes, ...], layout: SqlIdLayout = DEFAULT_LAYOUT) -> int:
-    """Decrypt one layout-width integer using the secret-derived Feistel PRP."""
+    """Invert the secret-derived Feistel permutation for one layout-width integer."""
     if not 0 <= value <= layout.value_mask:
         raise ValueError("value is outside layout range")
 
@@ -837,7 +840,7 @@ def id_to_hex(value: object) -> str | None:
 
 
 def id_to_hex_label(value: object, label: object) -> str | None:
-    """Return a labeled lowercase public hex ID for label IDs 1..30."""
+    """Return a labeled lowercase public hex ID for a label resolving to 1..30."""
     try:
         label_id = _coerce_label(label, allow_zero=False)
     except Exception:
@@ -846,12 +849,12 @@ def id_to_hex_label(value: object, label: object) -> str | None:
 
 
 def sql_generate_id(id_required: object) -> str | None:
-    """Alias for id_to_hex(): give me unlabeled hex from an id."""
+    """Alias for id_to_hex(): return unlabeled hex from an id."""
     return id_to_hex(id_required)
 
 
 def sql_generate_id_label(id_required: object, label: object) -> str | None:
-    """Alias for id_to_hex_label(): give me labeled hex from an id."""
+    """Alias for id_to_hex_label(): return labeled hex from an id."""
     return id_to_hex_label(id_required, label)
 
 
@@ -988,17 +991,17 @@ def hex_to_id_label(value: object, label: object) -> int | None:
 
 
 def sql_decode_id(value: object) -> int | None:
-    """Alias for hex_to_id(): give me an id from unlabeled hex."""
+    """Alias for hex_to_id(): return an id from unlabeled hex."""
     return hex_to_id(value)
 
 
 def sql_decode_id_label(value: object, label: object) -> int | None:
-    """Alias for hex_to_id_label(): give me an id from labeled hex."""
+    """Alias for hex_to_id_label(): return an id from hex with the expected label."""
     return hex_to_id_label(value, label)
 
 
 def hex_to_parts(value: object) -> tuple[int, str | None, int, int] | None:
-    """Return (label_id, label_name, version, integer_id) for any valid ID."""
+    """Return (label_id, label_name, version, integer_id) for any valid non-reserved label."""
     result = inspect_hex(value)
     if not result.ok or result.id is None or result.label_id is None or result.version is None:
         return None

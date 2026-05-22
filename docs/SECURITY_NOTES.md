@@ -6,7 +6,7 @@ This library maps a positive SQL integer ID to a public hex handle and back
 again:
 
 ```text
-SQL integer + label -> layout pack -> secret-keyed Feistel permutation -> lowercase hex
+SQL integer + label -> layout pack with keyed tag -> secret-keyed Feistel permutation -> lowercase hex
 ```
 
 The public handle is always 64 bits / 16 hex characters.
@@ -24,7 +24,7 @@ not an authorization layer and not a bearer-token system.
 
 | Field   | Bits | Values                                      |
 | ------- | ---: | ------------------------------------------- |
-| Version |    3 | `0..7`; issues `1`, reserves `0` and `7`    |
+| Version |    3 | `0..7`; issues `1`; `2..6` inactive/future; `0`, `7` reserved |
 | Label   |    5 | `0` none, `1..30` named labels, `31` reserved |
 | SQL ID  |   32 | public SQL IDs `1..4,294,967,295`           |
 | Tag     |   24 | keyed validation tag                        |
@@ -134,8 +134,9 @@ typed route enforcement.
 
 ## Error Ordering
 
-After decryption, validation checks the keyed tag before reporting inactive
-versions, reserved labels, label mismatches, or ID range failures.
+After inverting the Feistel permutation, validation checks the keyed tag before
+reporting inactive versions, reserved labels, label mismatches, or ID range
+failures.
 
 That keeps malformed random inputs from becoming a useful plaintext-field oracle
 except in the rare case where the compact tag is already valid.
@@ -174,7 +175,7 @@ for one exact expected label, then still apply normal authorization.
 
 Suitable:
 
-- compact public SQL-ID camouflage
+- compact public SQL-ID obfuscation
 - internal public handles
 - deterministic row handles where normal authorization is still checked
 - route/table/type separation with explicit labels
@@ -207,9 +208,9 @@ For bearer-token uses, generate independent random tokens of at least 128 bits.
 - `reload_sql_id_labels_from_file()` explicitly re-reads files and refreshes the cache.
 - `re_load_sql_id_labels_from_file()` is an alias for explicit application-controlled reloads.
 - YAML loading requires optional PyYAML; unavailable YAML support raises `ValueError`.
-- Same-stem JSON/YAML files are cross-checked and must match exactly after normalization.
+- Same-stem `.json`, `.yaml`, and `.yml` files are cross-checked and must match exactly after normalization.
 - Label config files larger than 2000 bytes are rejected.
-- Duplicate JSON/YAML keys, duplicate normalized names, duplicate IDs, and YAML bool label IDs are rejected.
-- ID `0` is always invalid.
+- Duplicate JSON/YAML keys, duplicate normalized names, duplicate IDs, boolean label IDs, and YAML boolean keys are rejected.
+- SQL ID `0` is always invalid.
 - Accepted SQL IDs are `1..(2^32 - 1)`.
 - The raw all-ones ID-index state is rejected.

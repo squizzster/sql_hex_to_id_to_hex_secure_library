@@ -30,7 +30,7 @@ The current format uses the full 64-bit / 16-hex-character budget:
 3 version bits + 5 label bits + 32 id bits + 24 keyed tag bits = 64 bits
 ```
 
-Plain value before encryption:
+Plain value before the keyed permutation:
 
 ```text
 [ version ][ label ][ zero-based SQL id index ][ keyed validation tag ]
@@ -43,7 +43,7 @@ Capacity:
 
 | Field   | Values                                      |
 | ------- | ------------------------------------------- |
-| Version | `0..7`; issues `1`, reserves `0` and `7`    |
+| Version | `0..7`; issues `1`; `2..6` inactive/future; `0`, `7` reserved |
 | Label   | `0` means no label, `1..30` named, `31` reserved |
 | SQL ID  | `1..4,294,967,295`                          |
 | Tag     | 24 keyed validation bits                    |
@@ -52,7 +52,7 @@ Capacity:
 
 ## Unlabeled API
 
-Use this when you just want the old simple behavior:
+Use this when the public ID does not need a table/type/bucket label:
 
 ```python
 from sql_id_library import id_to_hex, hex_to_id
@@ -73,7 +73,7 @@ If you pass a labeled public ID to `hex_to_id()`, it returns `None`.
 
 ## Labeled API
 
-Use labels when the public ID should carry a table/type/bucket:
+Use labels when the public ID should carry a numeric table/type/bucket label:
 
 ```python
 from sql_id_library import (
@@ -115,11 +115,13 @@ load_sql_id_labels_from_file("./conf/test_sql_id_labels.yaml")
 
 JSON support uses the Python standard library. YAML support is optional and
 requires PyYAML; if it is unavailable, loading a YAML file raises `ValueError`.
-If same-stem files both exist, for example `conf/test_sql_id_labels.json` and
-`conf/test_sql_id_labels.yaml`, the loader reads both and refuses to continue
-unless they normalize to exactly the same label registry. Each label file must be
-`2000` bytes or smaller. Duplicate file keys, duplicate normalized label names,
-duplicate label IDs, and YAML boolean label IDs are rejected.
+If same-stem files exist in more than one supported format, for example
+`conf/test_sql_id_labels.json` and `conf/test_sql_id_labels.yaml`, the loader
+reads every available same-stem `.json`, `.yaml`, and `.yml` file and refuses to
+continue unless they normalize to exactly the same label registry. Each label
+file must be `2000` bytes or smaller. Duplicate file keys, duplicate normalized
+label names, duplicate label IDs, boolean label IDs, and YAML boolean keys are
+rejected.
 
 File-loaded labels are cached automatically after the first successful load.
 Later calls to `load_sql_id_labels_from_file()` for the same same-stem path
@@ -177,7 +179,8 @@ id_to_hex_label(123, 1)
 hex_to_id_label(public_hex, 1)
 ```
 
-Allowed labeled IDs are `1..30`. Label `0` is reserved for the unlabeled API.
+Allowed label IDs for the labeled API are `1..30`. Label `0` is reserved for
+the unlabeled API.
 Label `31` is reserved for future escape behavior.
 
 ---
@@ -247,7 +250,8 @@ The environment value is the secret key.
 
 Keep it private.
 Keep it stable.
-Rotate it deliberately.
+Rotate it deliberately; changing it makes previously issued public IDs stop
+decoding.
 
 ---
 
