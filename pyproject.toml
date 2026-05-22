@@ -16,5 +16,8 @@ classifiers = [
     "Topic :: Security :: Cryptography",
 ]
 
+[project.optional-dependencies]
+yaml = ["PyYAML>=6.0"]
+
 [tool.setuptools]
 py-modules = ["sql_id_library"]

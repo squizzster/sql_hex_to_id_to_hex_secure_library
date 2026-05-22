@@ -25,5 +25,16 @@ If same-stem JSON and YAML files both exist, they must normalize to the same
 label registry or loading fails. JSON is supported by the Python standard
 library. YAML requires optional PyYAML.
 
+File-loaded labels are cached after the first successful load. For long-running
+application tasks, keep using the cached labels. If application logic decides it
+must re-read files from disk, call:
+
+```python
+reload_sql_id_labels_from_file("./conf/test_sql_id_labels.yaml")
+```
+
+`re_load_sql_id_labels_from_file()` is available as an alias for the same
+application-controlled refresh.
+
 Label IDs are permanent schema. Do not reuse a label ID for a different meaning
 after public IDs have been issued.

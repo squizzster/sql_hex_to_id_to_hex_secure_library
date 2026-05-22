@@ -2,10 +2,10 @@
 """Developer demo and tiny CLI for sql_id_library.py.
 
 Run:
-    ./sql_id_demo_for_dev.py
-    ./sql_id_demo_for_dev.py --int_id 1
-    ./sql_id_demo_for_dev.py --int_id 1 --label users
-    ./sql_id_demo_for_dev.py --hex_id 65a5cb411fa554a0
+    ./bin_demo/sql_id_demo_for_dev.py
+    ./bin_demo/sql_id_demo_for_dev.py --int_id 1
+    ./bin_demo/sql_id_demo_for_dev.py --int_id 1 --label users
+    ./bin_demo/sql_id_demo_for_dev.py --hex_id 65a5cb411fa554a0
 
 For real applications, set XCTX_ID_PASSWORD yourself with a strong secret:
     export XCTX_ID_PASSWORD="$(python -c 'import secrets; print(secrets.token_hex(32))')"
@@ -17,11 +17,15 @@ import argparse
 import os
 import sys
 from collections.abc import Sequence
+from pathlib import Path
 
 
 DEMO_HARD_CODED_PASSWORD = "demo-hard-coded-secret-" + ("0123456789abcdef" * 4)
 DEMO_LABELS = {"users": 1, "plans": 2, "repair": 3}
 USING_DEMO_HARD_CODED_PASSWORD = False
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from sql_id_library import (  # noqa: E402 - demo config is set before first probe
     ENV_PASSWORD_NAME,
@@ -83,20 +87,20 @@ def parse_label(value: str | None) -> str | int | None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        prog="./sql_id_demo_for_dev.py",
+        prog="./bin_demo/sql_id_demo_for_dev.py",
         description=(
             "Developer demo for sql_id_library: explain the fixed 16-character "
             "layout, or encode/decode one ID."
         ),
         epilog=(
             "Examples:\n"
-            "  ./sql_id_demo_for_dev.py\n"
-            "  ./sql_id_demo_for_dev.py --int_id 1\n"
-            "  ./sql_id_demo_for_dev.py --int_id 1 --label users\n"
-            "  ./sql_id_demo_for_dev.py --labels-file ./conf/test_sql_id_labels.yaml --int_id 1 --label repair\n"
-            "  ./sql_id_demo_for_dev.py --hex_id 65a5cb411fa554a0\n"
-            "  ./sql_id_demo_for_dev.py --hex_id 65a5cb411fa554a0 --label users\n"
-            "  ./sql_id_demo_for_dev.py --strict-config --int_id 1\n\n"
+            "  ./bin_demo/sql_id_demo_for_dev.py\n"
+            "  ./bin_demo/sql_id_demo_for_dev.py --int_id 1\n"
+            "  ./bin_demo/sql_id_demo_for_dev.py --int_id 1 --label users\n"
+            "  ./bin_demo/sql_id_demo_for_dev.py --labels-file ./conf/test_sql_id_labels.yaml --int_id 1 --label repair\n"
+            "  ./bin_demo/sql_id_demo_for_dev.py --hex_id 65a5cb411fa554a0\n"
+            "  ./bin_demo/sql_id_demo_for_dev.py --hex_id 65a5cb411fa554a0 --label users\n"
+            "  ./bin_demo/sql_id_demo_for_dev.py --strict-config --int_id 1\n\n"
             "Demo label names are users=1, plans=2, repair=3. Numeric labels "
             "1..30 also work. Set XCTX_ID_PASSWORD for stable results across "
             "separate commands."
@@ -224,12 +228,12 @@ def show_default_demo() -> None:
 
     print("CLI commands")
     print("------------")
-    print("  ./sql_id_demo_for_dev.py --int_id 1")
-    print("  ./sql_id_demo_for_dev.py --int_id 1 --label users")
-    print("  ./sql_id_demo_for_dev.py --labels-file ./conf/test_sql_id_labels.yaml --int_id 1 --label repair")
-    print("  ./sql_id_demo_for_dev.py --hex_id \"<public_hex>\"")
-    print("  ./sql_id_demo_for_dev.py --hex_id \"<public_hex>\" --label users")
-    print("  ./sql_id_demo_for_dev.py --help")
+    print("  ./bin_demo/sql_id_demo_for_dev.py --int_id 1")
+    print("  ./bin_demo/sql_id_demo_for_dev.py --int_id 1 --label users")
+    print("  ./bin_demo/sql_id_demo_for_dev.py --labels-file ./conf/test_sql_id_labels.yaml --int_id 1 --label repair")
+    print("  ./bin_demo/sql_id_demo_for_dev.py --hex_id \"<public_hex>\"")
+    print("  ./bin_demo/sql_id_demo_for_dev.py --hex_id \"<public_hex>\" --label users")
+    print("  ./bin_demo/sql_id_demo_for_dev.py --help")
 
 
 def encode_cli(sql_id: int, *, label: str | int | None, details: bool) -> None:

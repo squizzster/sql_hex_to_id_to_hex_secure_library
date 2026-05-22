@@ -2,7 +2,7 @@
 """Tests for sql_id_library.py.
 
 Run with:
-    XCTX_ID_PASSWORD="$(python -c 'import secrets; print(secrets.token_hex(32))')" python test_sql_id.py
+    XCTX_ID_PASSWORD="$(python -c 'import secrets; print(secrets.token_hex(32))')" python run_tests_for_sql_id.py
 
 The tests set a safe default test password when one is not already present, then
 also cover missing, weak, low-diversity, and wrong-password behavior.
@@ -230,6 +230,72 @@ class SqlIdLibraryTests(unittest.TestCase):
         encoded = self.assert_public_hex(sid.id_to_hex_label(123, "execute"))
         self.assertEqual(sid.hex_to_id_label(encoded, "execute"), 123)
         self.assertIsNone(sid.hex_to_id_label(encoded, "repair"))
+
+    def test_load_sql_id_labels_from_file_uses_cache_until_explicit_reload(self) -> None:
+        json_path = TEST_DIR / "cached_sql_id_labels.json"
+        json_path.write_text('{"dry_run": 1}\n', encoding="utf-8")
+        try:
+            sid.load_sql_id_labels_from_file(json_path)
+            self.assertEqual(sid.available_labels(), {"dry_run": 1})
+
+            json_path.write_text('{"repair": 5}\n', encoding="utf-8")
+            sid.load_sql_id_labels_from_file(json_path)
+            self.assertEqual(sid.available_labels(), {"dry_run": 1})
+
+            json_path.write_text("[1, 2, 3]\n", encoding="utf-8")
+            with self.assertRaises(ValueError):
+                sid.reload_sql_id_labels_from_file(json_path)
+            self.assertEqual(sid.available_labels(), {"dry_run": 1})
+
+            json_path.write_text('{"repair": 5}\n', encoding="utf-8")
+            sid.reload_sql_id_labels_from_file(json_path)
+            self.assertEqual(sid.available_labels(), {"repair": 5})
+
+            json_path.write_text('{"execute": 3}\n', encoding="utf-8")
+            sid.load_sql_id_labels_from_file(json_path)
+            self.assertEqual(sid.available_labels(), {"repair": 5})
+
+            sid.clear_sql_id_labels()
+            json_path.write_text('{"plan": 2}\n', encoding="utf-8")
+            sid.load_sql_id_labels_from_file(json_path)
+            self.assertEqual(sid.available_labels(), {"plan": 2})
+        finally:
+            json_path.unlink(missing_ok=True)
+
+    def test_re_load_sql_id_labels_from_file_alias_refreshes_cache(self) -> None:
+        json_path = TEST_DIR / "re_load_alias_sql_id_labels.json"
+        json_path.write_text('{"dry_run": 1}\n', encoding="utf-8")
+        try:
+            sid.load_sql_id_labels_from_file(json_path)
+            self.assertEqual(sid.available_labels(), {"dry_run": 1})
+
+            json_path.write_text('{"execute": 3}\n', encoding="utf-8")
+            sid.re_load_sql_id_labels_from_file(json_path)
+            self.assertEqual(sid.available_labels(), {"execute": 3})
+        finally:
+            json_path.unlink(missing_ok=True)
+
+    def test_cached_label_files_share_same_stem_across_json_and_yaml_paths(self) -> None:
+        json_path = TEST_DIR / "same_stem_cached_labels.json"
+        yaml_path = TEST_DIR / "same_stem_cached_labels.yaml"
+        json_path.write_text('{"dry_run": 1}\n', encoding="utf-8")
+        yaml_path.write_text("1: dry_run\n", encoding="utf-8")
+        try:
+            sid.load_sql_id_labels_from_file(json_path)
+            self.assertEqual(sid.available_labels(), {"dry_run": 1})
+            with self.assertRaises(ValueError):
+                sid.load_sql_id_labels_from_file(TEST_DIR / "same_stem_cached_labels.txt")
+
+            json_path.write_text('{"repair": 5}\n', encoding="utf-8")
+            yaml_path.write_text("5: repair\n", encoding="utf-8")
+            sid.load_sql_id_labels_from_file(yaml_path)
+            self.assertEqual(sid.available_labels(), {"dry_run": 1})
+
+            sid.reload_sql_id_labels_from_file(yaml_path)
+            self.assertEqual(sid.available_labels(), {"repair": 5})
+        finally:
+            json_path.unlink(missing_ok=True)
+            yaml_path.unlink(missing_ok=True)
 
     def test_load_sql_id_labels_from_file_rejects_bad_inputs(self) -> None:
         sid.configure_sql_id_labels({"users": 1})

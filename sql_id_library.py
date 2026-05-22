@@ -242,6 +242,7 @@ _MAX_LABEL_FILE_BYTES: Final[int] = 2000
 _LABEL_LOCK = RLock()
 _LABELS_BY_NAME: Mapping[str, int] = MappingProxyType({})
 _LABEL_NAMES_BY_ID: Mapping[int, str] = MappingProxyType({})
+_LABEL_FILE_CACHE: dict[Path, Mapping[str, int]] = {}
 
 __all__ = [
     "ACTIVE_DECODE_VERSIONS",
@@ -281,6 +282,8 @@ __all__ = [
     "is_configured",
     "layout_for_hex_length",
     "load_sql_id_labels_from_file",
+    "re_load_sql_id_labels_from_file",
+    "reload_sql_id_labels_from_file",
     "sql_decode_id",
     "sql_decode_id_label",
     "sql_generate_id",
@@ -523,6 +526,13 @@ def _candidate_label_paths(path: Path) -> tuple[Path, ...]:
     return tuple(dict.fromkeys(candidates))
 
 
+def _label_file_cache_key(path: Path) -> Path:
+    """Return the same cache key for same-stem JSON/YAML label files."""
+    if path.suffix.lower() not in {".json", ".yaml", ".yml"}:
+        raise ValueError("label file must use .json, .yaml, or .yml")
+    return path.expanduser().resolve().with_suffix("")
+
+
 def _load_one_label_file(path: Path) -> dict[str, int]:
     """Load one label file, enforce size, and return a normalized mapping."""
     suffix = path.suffix.lower()
@@ -554,8 +564,18 @@ def _load_one_label_file(path: Path) -> dict[str, int]:
     return by_name
 
 
+def _load_sql_id_label_files_uncached(label_path: Path) -> dict[str, int]:
+    """Load same-stem label files from disk and return a validated mapping."""
+    loaded = [(candidate, _load_one_label_file(candidate)) for candidate in _candidate_label_paths(label_path)]
+    first_path, first_labels = loaded[0]
+    for candidate, labels in loaded[1:]:
+        if labels != first_labels:
+            raise ValueError(f"label files do not match: {first_path} and {candidate}")
+    return first_labels
+
+
 def load_sql_id_labels_from_file(path: str | os.PathLike[str]) -> None:
-    """Load label names from JSON/YAML files and configure them.
+    """Load cached label names from JSON/YAML files and configure them.
 
     JSON support uses the Python standard library. YAML support is optional and
     requires PyYAML to be installed. Supported mapping shapes are:
@@ -566,14 +586,36 @@ def load_sql_id_labels_from_file(path: str | os.PathLike[str]) -> None:
     If same-stem JSON and YAML files both exist, all available files are loaded
     and must normalize to the same label registry. Each file must be no larger
     than 2000 bytes.
+
+    File content is cached by same-stem path after the first successful load.
+    Use reload_sql_id_labels_from_file() when application logic intentionally
+    wants to re-read label files from disk.
     """
     label_path = Path(path)
-    loaded = [(candidate, _load_one_label_file(candidate)) for candidate in _candidate_label_paths(label_path)]
-    first_path, first_labels = loaded[0]
-    for candidate, labels in loaded[1:]:
-        if labels != first_labels:
-            raise ValueError(f"label files do not match: {first_path} and {candidate}")
-    configure_sql_id_labels(first_labels)
+    cache_key = _label_file_cache_key(label_path)
+    with _LABEL_LOCK:
+        cached_labels = _LABEL_FILE_CACHE.get(cache_key)
+        if cached_labels is None:
+            loaded_labels = _load_sql_id_label_files_uncached(label_path)
+            cached_labels = MappingProxyType(dict(loaded_labels))
+            _LABEL_FILE_CACHE[cache_key] = cached_labels
+        configure_sql_id_labels(cached_labels)
+
+
+def reload_sql_id_labels_from_file(path: str | os.PathLike[str]) -> None:
+    """Re-read label names from disk, refresh the cache, and configure them."""
+    label_path = Path(path)
+    cache_key = _label_file_cache_key(label_path)
+    loaded_labels = _load_sql_id_label_files_uncached(label_path)
+    cached_labels = MappingProxyType(dict(loaded_labels))
+    with _LABEL_LOCK:
+        _LABEL_FILE_CACHE[cache_key] = cached_labels
+        configure_sql_id_labels(cached_labels)
+
+
+def re_load_sql_id_labels_from_file(path: str | os.PathLike[str]) -> None:
+    """Alias for reload_sql_id_labels_from_file()."""
+    reload_sql_id_labels_from_file(path)
 
 
 def clear_sql_id_labels() -> None:
@@ -583,6 +625,7 @@ def clear_sql_id_labels() -> None:
     with _LABEL_LOCK:
         _LABELS_BY_NAME = MappingProxyType({})
         _LABEL_NAMES_BY_ID = MappingProxyType({})
+        _LABEL_FILE_CACHE.clear()
 
 
 def available_labels() -> dict[str, int]:

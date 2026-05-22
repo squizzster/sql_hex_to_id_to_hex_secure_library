@@ -121,6 +121,19 @@ unless they normalize to exactly the same label registry. Each label file must b
 `2000` bytes or smaller. Duplicate file keys, duplicate normalized label names,
 duplicate label IDs, and YAML boolean label IDs are rejected.
 
+File-loaded labels are cached after the first successful load, which is the
+right default for long-running tasks. If application logic intentionally needs
+to re-read label files from disk, call:
+
+```python
+from sql_id_library import reload_sql_id_labels_from_file
+
+reload_sql_id_labels_from_file("./conf/test_sql_id_labels.yaml")
+```
+
+`re_load_sql_id_labels_from_file()` is also available as a spelling-friendly
+alias for explicit application-controlled reloads.
+
 Supported file shapes:
 
 ```yaml
@@ -322,12 +335,12 @@ It does not mean access granted.
 ## Developer Demo
 
 ```bash
-./sql_id_demo_for_dev.py
-./sql_id_demo_for_dev.py --int_id 1
-./sql_id_demo_for_dev.py --int_id 1 --label users
-./sql_id_demo_for_dev.py --labels-file ./conf/test_sql_id_labels.yaml --int_id 1 --label repair
-./sql_id_demo_for_dev.py --hex_id "<public_hex>"
-./sql_id_demo_for_dev.py --hex_id "<public_hex>" --label users
+./bin_demo/sql_id_demo_for_dev.py
+./bin_demo/sql_id_demo_for_dev.py --int_id 1
+./bin_demo/sql_id_demo_for_dev.py --int_id 1 --label users
+./bin_demo/sql_id_demo_for_dev.py --labels-file ./conf/test_sql_id_labels.yaml --int_id 1 --label repair
+./bin_demo/sql_id_demo_for_dev.py --hex_id "<public_hex>"
+./bin_demo/sql_id_demo_for_dev.py --hex_id "<public_hex>" --label users
 ```
 
 The demo configures local sample labels:
