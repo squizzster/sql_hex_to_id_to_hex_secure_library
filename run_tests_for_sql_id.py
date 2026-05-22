@@ -88,6 +88,8 @@ class SqlIdLibraryTests(unittest.TestCase):
         self.assertEqual(sid.MYSQL_UNSIGNED_INT_MAX, 4_294_967_295)
         self.assertGreaterEqual(sid.MIN_PASSWORD_BYTES, 32)
         self.assertGreaterEqual(sid.ROUNDS, 12)
+        self.assertRegex(sid.DOMAIN_SALT_HEX, re.compile(r"^[0-9a-fA-F]{64}$"))
+        self.assertEqual(len(bytes.fromhex(sid.DOMAIN_SALT_HEX)), 32)
         self.assertTrue(sid._constants_are_sane())
 
         self.assertEqual(layout.version_bits + layout.label_bits + layout.id_bits + layout.tag_bits, 64)

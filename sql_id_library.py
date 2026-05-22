@@ -47,12 +47,15 @@ Generic inspection:
 
 Secret configuration:
 
-    Set XCTX_ID_PASSWORD to at least 32 UTF-8 bytes of secret. Recommended:
+    Replace DOMAIN_SALT_HEX near the top of this file with a deployment-specific
+    32-byte random hex string, then set XCTX_ID_PASSWORD to at least 32 UTF-8
+    bytes of secret. Generate each value independently:
 
         python -c "import secrets; print(secrets.token_hex(32))"
 
-    Store the printed 64-hex-character value in XCTX_ID_PASSWORD. The fixed
-    domain salt below is not secret; the environment value is the key.
+    The bundled domain salt is public. A private deployment-specific salt is
+    useful hardening, but XCTX_ID_PASSWORD remains the secret key. Changing
+    either value after issuing IDs makes existing public IDs stop decoding.
 
 Operational hardening:
 
@@ -114,8 +117,15 @@ ROUNDS: Final[int] = 16
 ACTIVE_DECODE_VERSIONS: Final[frozenset[int]] = frozenset({ISSUE_VERSION})
 SUPPORTED_HEX_LENGTHS: Final[tuple[int, ...]] = (HEX_CHARS,)
 
-# Fixed 32-byte domain-separation salt. This is not secret; the environment
-# secret is the secret. Changing this salt intentionally creates a new scheme.
+# Deployment-specific 32-byte domain-separation salt.
+#
+# The bundled value is public and accepted for library/demo use, but deployed
+# applications should replace it with a private random value generated with:
+#
+#     python -c "import secrets; print(secrets.token_hex(32))"
+#
+# Generate this independently from XCTX_ID_PASSWORD. Changing either value after
+# issuing public IDs intentionally creates a new scheme and breaks old IDs.
 DOMAIN_SALT_HEX: Final[str] = "0b91b4e8fd74bcb256a19d188c83470a7b75a4897babb252e54b6eb8f8bb392d"
 _DOMAIN_SALT: Final[bytes] = bytes.fromhex(DOMAIN_SALT_HEX)
 

@@ -20,6 +20,29 @@ No UUID primary keys.
 No public-ID lookup table.
 No exposed sequential IDs.
 
+For deployment setup, including the public-ID salt and runtime secret, see
+[INSTALL.md](INSTALL.md).
+
+---
+
+## Deployment Hardening
+
+For deployed public IDs, replace `DOMAIN_SALT_HEX` near the top of
+`sql_id_library.py` with a deployment-specific 32-byte random hex value:
+
+```bash
+python -c "import secrets; print(secrets.token_hex(32))"
+```
+
+The bundled salt is public and is accepted by the library, but changing it is
+strongly recommended for public-ID deployment hardening. If an attacker does not
+have the deployment salt, they need both the deployed source/config value and
+`XCTX_ID_PASSWORD` to reproduce the public-ID scheme.
+
+Generate `DOMAIN_SALT_HEX` and `XCTX_ID_PASSWORD` independently. Changing either
+value after public IDs have been issued makes those existing public IDs stop
+decoding.
+
 ---
 
 ## Bit Layout
@@ -236,7 +259,7 @@ Typical errors include:
 
 ## Configuration
 
-Set `XCTX_ID_PASSWORD` to a strong secret.
+Set `XCTX_ID_PASSWORD` to a strong secret after setting the deployment salt.
 
 Use at least 32 UTF-8 bytes:
 
@@ -244,14 +267,10 @@ Use at least 32 UTF-8 bytes:
 export XCTX_ID_PASSWORD="$(python -c 'import secrets; print(secrets.token_hex(32))')"
 ```
 
-The fixed domain salt in the library is not secret.
-
-The environment value is the secret key.
-
 Keep it private.
 Keep it stable.
 Rotate it deliberately; changing it makes previously issued public IDs stop
-decoding.
+decoding. Do not reuse `DOMAIN_SALT_HEX` as `XCTX_ID_PASSWORD`.
 
 ---
 
