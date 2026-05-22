@@ -1,57 +1,47 @@
-"""Layout-registry driven reversible SQL integer public IDs.
+"""Reversible 16-hex-character public IDs for SQL integer keys.
 
 This module turns a positive SQL integer ID into a deterministic public hex ID,
-and turns a valid public hex ID back into the original integer. The design is
-small on purpose:
+and turns a valid public hex ID back into the original integer. The public ID is
+always 16 lowercase hex characters:
 
-    id_to_hex(123)                    -> "16 lowercase hex chars" by default
-    hex_to_id("...")                 -> 123, or None
-    validate_hex("...")              -> structured success or real error detail
+    3 version bits + 5 label bits + 32 id bits + 24 keyed tag bits = 64 bits
 
-The encoder/decoder is driven by a fixed layout registry. Callers choose a
-named profile and an optional boosted mode; callers do not provide arbitrary bit
-counts.
-
-Default public ID:
-
-    profile="uint32", boosted=False
-    4 version bits + 32 id bits + 28 keyed tag bits = 64 bits = 16 hex chars
-
-Normal layouts:
-
-    uint8   4 version +  8 id + 28 tag =  40 bits = 10 hex chars
-    uint16  4 version + 16 id + 28 tag =  48 bits = 12 hex chars
-    uint24  4 version + 24 id + 28 tag =  56 bits = 14 hex chars
-    uint32  4 version + 32 id + 28 tag =  64 bits = 16 hex chars
-    uint48  4 version + 48 id + 28 tag =  80 bits = 20 hex chars
-    uint64  4 version + 64 id + 28 tag =  96 bits = 24 hex chars
-
-Boosted layouts:
-
-    uint8   4 version +  8 id + 60 tag =  72 bits = 18 hex chars
-    uint16  4 version + 16 id + 68 tag =  88 bits = 22 hex chars
-    uint24  4 version + 24 id + 76 tag = 104 bits = 26 hex chars
-    uint32  4 version + 32 id + 76 tag = 112 bits = 28 hex chars
-    uint48  4 version + 48 id + 68 tag = 120 bits = 30 hex chars
-    uint64  4 version + 64 id + 60 tag = 128 bits = 32 hex chars
-
-Decode is length-driven. Each supported hex length maps to exactly one layout;
-there is no caller-supplied decode profile and no embedded boost flag.
-
-Public format:
-
-    SQL integer -> layout pack -> secret-keyed Feistel permutation -> hex
+Label ``0`` is the ordinary unlabeled mode used by ``id_to_hex()`` and
+``hex_to_id()``. Labels ``1..30`` are typed/table/bucket labels used only by the
+explicit labeled API. Label ``31`` is reserved.
 
 Plain layout before the Feistel permutation:
 
-    [ version ][ zero-based SQL id index ][ keyed validation tag ]
+    [ version ][ label ][ zero-based SQL id index ][ keyed validation tag ]
 
-SQL ID policy:
+The keyed validation tag covers the scheme, bit layout, version, label, and ID
+index. A valid labeled ID cannot be reinterpreted as unlabeled, and a valid ID
+for one label cannot be decoded by asking for another label.
 
-    * ID 0 is always invalid/reserved.
-    * profile uintN accepts SQL IDs 1..(2**N - 1).
-    * the raw all-ones id-index state is rejected, so uint32's maximum public
-      SQL ID is the conventional 4_294_967_295.
+Security model:
+
+    This is a deterministic public-handle layer for internal SQL integer IDs. It
+    hides sequential IDs and rejects almost all random/tampered inputs. It is not
+    a bearer token, authentication system, authorization system, or proof of
+    permission. Always check decoded IDs against normal application permissions
+    and business rules.
+
+Strict decoder probability:
+
+    The integer-returning APIs always check one exact expected label:
+
+        hex_to_id(public_hex)                 expects label 0
+        hex_to_id_label(public_hex, label)    expects labels 1..30
+
+    For one expected label, random-valid probability is:
+
+        (2**32 - 1) / 2**64, just under 2**-32
+
+Generic inspection:
+
+    ``inspect_hex()`` and ``hex_to_parts()`` are diagnostic helpers. They accept
+    any valid non-reserved label, so they are intentionally not the enforcement
+    API for typed routes.
 
 Secret configuration:
 
@@ -62,21 +52,6 @@ Secret configuration:
     Store the printed 64-hex-character value in XCTX_ID_PASSWORD. The fixed
     domain salt below is not secret; the environment value is the key.
 
-Security model:
-
-    This is a deterministic public-handle layer for internal SQL integer IDs. It
-    hides sequential IDs and rejects almost all random/tampered inputs. It is not
-    a bearer token, authentication system, authorization system, or proof of
-    permission. Always check decoded IDs against normal application permissions
-    and business rules.
-
-Random-valid probability for a uniformly random string of the right length is:
-
-    (2**id_bits - 1) / 2**total_bits
-
-    Normal layouts are all just under 2**-32.
-    Boosted layouts are at least just under 2**-64, and some are stronger.
-
 Operational hardening:
 
     A real deployment should count bad public IDs as suspicious. A strong policy
@@ -85,15 +60,10 @@ Operational hardening:
 
         10 * 2 * 24 * 365 = 175_200 guesses/year/bucket
 
-    For normal layouts, any-profile random-valid odds are approximately 2**-32,
+    For strict expected-label decoding, random-valid odds are just under 2**-32,
     so the worst-case expected time to hit any syntactically valid public ID is:
 
         2**32 / 175_200 ~= 24_515 years/bucket
-
-    Boosted uint64, the least-rejecting boosted profile, is approximately
-    2**-64, giving:
-
-        2**64 / 175_200 ~= 105_289_635_123_913 years/bucket
 
     This rate-limit policy raises the practical online attack cost. It does not
     turn these IDs into possession-grants-access tokens. For reset links,
@@ -105,10 +75,13 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import json
 import os
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import lru_cache
+from pathlib import Path
 from typing import Final
 
 
@@ -116,16 +89,26 @@ ENV_PASSWORD_NAME: Final[str] = "XCTX_ID_PASSWORD"
 MIN_PASSWORD_BYTES: Final[int] = 32
 MIN_PASSWORD_UNIQUE_BYTES: Final[int] = 8
 
-SCHEME_REVISION: Final[int] = 1
-VERSION_BITS: Final[int] = 4
-ISSUE_VERSION: Final[int] = 1
-ACTIVE_DECODE_VERSIONS: Final[frozenset[int]] = frozenset({ISSUE_VERSION})
+SCHEME_REVISION: Final[int] = 2
+VERSION_BITS: Final[int] = 3
+LABEL_BITS: Final[int] = 5
+ID_BITS: Final[int] = 32
+TAG_BITS: Final[int] = 24
+TOTAL_BITS: Final[int] = 64
+HEX_CHARS: Final[int] = 16
 
-DEFAULT_PROFILE: Final[str] = "uint32"
-DEFAULT_BOOSTED: Final[bool] = False
+ISSUE_VERSION: Final[int] = 1
+NO_LABEL: Final[int] = 0
+RESERVED_VERSION: Final[int] = (1 << VERSION_BITS) - 1
+RESERVED_LABEL: Final[int] = (1 << LABEL_BITS) - 1
+MAX_LABEL: Final[int] = RESERVED_LABEL - 1
 MIN_ID: Final[int] = 1
-MYSQL_UNSIGNED_INT_MAX: Final[int] = (1 << 32) - 1
+MAX_ID: Final[int] = (1 << ID_BITS) - 1
+MYSQL_UNSIGNED_INT_MAX: Final[int] = MAX_ID
 ROUNDS: Final[int] = 16
+
+ACTIVE_DECODE_VERSIONS: Final[frozenset[int]] = frozenset({ISSUE_VERSION})
+SUPPORTED_HEX_LENGTHS: Final[tuple[int, ...]] = (HEX_CHARS,)
 
 # Fixed 32-byte domain-separation salt. This is not secret; the environment
 # secret is the secret. Changing this salt intentionally creates a new scheme.
@@ -134,23 +117,19 @@ _DOMAIN_SALT: Final[bytes] = bytes.fromhex(DOMAIN_SALT_HEX)
 
 _DECIMAL_RE: Final[re.Pattern[str]] = re.compile(r"^[0-9]+$")
 _HEX_CHARS_RE: Final[re.Pattern[str]] = re.compile(r"^[0-9a-fA-F]+$")
+_LABEL_NAME_RE: Final[re.Pattern[str]] = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
 
 
 @dataclass(frozen=True)
 class SqlIdLayout:
-    """A fixed public-ID layout selected by profile and mode."""
+    """The fixed 64-bit public-ID layout."""
 
-    profile: str
-    mode: str
-    id_bits: int
     version_bits: int
+    label_bits: int
+    id_bits: int
     tag_bits: int
     total_bits: int
     hex_chars: int
-
-    @property
-    def boosted(self) -> bool:
-        return self.mode == "boosted"
 
     @property
     def bytes(self) -> int:
@@ -163,12 +142,16 @@ class SqlIdLayout:
     @property
     def max_id(self) -> int:
         # ID 0 is invalid and SQL IDs are represented as zero-based indexes.
-        # Rejecting the raw all-ones id-index state makes uintN max == 2**N - 1.
+        # Rejecting the raw all-ones id-index state makes max == 2**32 - 1.
         return (1 << self.id_bits) - 1
 
     @property
     def version_mask(self) -> int:
         return (1 << self.version_bits) - 1
+
+    @property
+    def label_mask(self) -> int:
+        return (1 << self.label_bits) - 1
 
     @property
     def id_mask(self) -> int:
@@ -203,121 +186,111 @@ class SqlIdLayout:
         return (1 << self.half_bits) - 1
 
     @property
-    def random_valid_probability(self) -> float:
+    def random_valid_probability_for_expected_label(self) -> float:
         return self.max_id / float(1 << self.total_bits)
+
+    @property
+    def random_valid_probability_for_any_label(self) -> float:
+        return ((MAX_LABEL + 1) * self.max_id) / float(1 << self.total_bits)
 
     def domain_label(self) -> bytes:
         """Return canonical bytes for key-domain separation."""
         return (
-            f"scheme={SCHEME_REVISION};profile={self.profile};mode={self.mode};"
-            f"version_bits={self.version_bits};id_bits={self.id_bits};"
+            f"scheme={SCHEME_REVISION};version_bits={self.version_bits};"
+            f"label_bits={self.label_bits};id_bits={self.id_bits};"
             f"tag_bits={self.tag_bits};total_bits={self.total_bits};"
-            f"hex_chars={self.hex_chars};issue_version={ISSUE_VERSION}"
+            f"hex_chars={self.hex_chars};issue_version={ISSUE_VERSION};"
+            f"no_label={NO_LABEL};max_label={MAX_LABEL};"
+            f"reserved_label={RESERVED_LABEL};reserved_version={RESERVED_VERSION}"
         ).encode("ascii")
 
 
 @dataclass(frozen=True)
 class SqlIdValidation:
-    """Structured validation result returned by validate_hex()."""
+    """Structured validation result returned by validate/inspect helpers."""
 
     ok: bool
     id: int | None = None
     public_hex: str | None = None
-    profile: str | None = None
-    mode: str | None = None
+    label_id: int | None = None
+    label: str | None = None
     version: int | None = None
     layout: SqlIdLayout | None = None
     error_code: str | None = None
     error: str | None = None
 
 
-_LAYOUT_SPECS: Final[tuple[tuple[str, str, int, int, int, int], ...]] = (
-    # profile, mode, id_bits, tag_bits, total_bits, hex_chars
-    ("uint8", "normal", 8, 28, 40, 10),
-    ("uint16", "normal", 16, 28, 48, 12),
-    ("uint24", "normal", 24, 28, 56, 14),
-    ("uint32", "normal", 32, 28, 64, 16),
-    ("uint48", "normal", 48, 28, 80, 20),
-    ("uint64", "normal", 64, 28, 96, 24),
-    ("uint8", "boosted", 8, 60, 72, 18),
-    ("uint16", "boosted", 16, 68, 88, 22),
-    ("uint24", "boosted", 24, 76, 104, 26),
-    ("uint32", "boosted", 32, 76, 112, 28),
-    ("uint48", "boosted", 48, 68, 120, 30),
-    ("uint64", "boosted", 64, 60, 128, 32),
+DEFAULT_LAYOUT: Final[SqlIdLayout] = SqlIdLayout(
+    version_bits=VERSION_BITS,
+    label_bits=LABEL_BITS,
+    id_bits=ID_BITS,
+    tag_bits=TAG_BITS,
+    total_bits=TOTAL_BITS,
+    hex_chars=HEX_CHARS,
 )
+LAYOUT: Final[SqlIdLayout] = DEFAULT_LAYOUT
+MAX_PUBLIC_HEX_CHARS: Final[int] = HEX_CHARS
 
-LAYOUTS: Final[tuple[SqlIdLayout, ...]] = tuple(
-    SqlIdLayout(
-        profile=profile,
-        mode=mode,
-        id_bits=id_bits,
-        version_bits=VERSION_BITS,
-        tag_bits=tag_bits,
-        total_bits=total_bits,
-        hex_chars=hex_chars,
-    )
-    for profile, mode, id_bits, tag_bits, total_bits, hex_chars in _LAYOUT_SPECS
-)
-
-LAYOUTS_BY_PROFILE_MODE: Final[dict[tuple[str, str], SqlIdLayout]] = {
-    (layout.profile, layout.mode): layout for layout in LAYOUTS
-}
-LAYOUTS_BY_HEX_LENGTH: Final[dict[int, SqlIdLayout]] = {
-    layout.hex_chars: layout for layout in LAYOUTS
-}
-SUPPORTED_PROFILES: Final[tuple[str, ...]] = ("uint8", "uint16", "uint24", "uint32", "uint48", "uint64")
-SUPPORTED_HEX_LENGTHS: Final[tuple[int, ...]] = tuple(sorted(LAYOUTS_BY_HEX_LENGTH))
-DEFAULT_LAYOUT: Final[SqlIdLayout] = LAYOUTS_BY_PROFILE_MODE[(DEFAULT_PROFILE, "normal")]
-MAX_ID: Final[int] = DEFAULT_LAYOUT.max_id
-ID_BITS: Final[int] = DEFAULT_LAYOUT.id_bits
-TAG_BITS: Final[int] = DEFAULT_LAYOUT.tag_bits
-
-# Hard caps for untrusted string inputs. Public IDs are at most 32 hex chars,
-# and uint64 decimal IDs need 20 digits; 32 leaves room for leading-zero padding.
-_MAX_PUBLIC_HEX_CHARS: Final[int] = max(SUPPORTED_HEX_LENGTHS)
+# Hard caps for untrusted string inputs. Public IDs are exactly 16 hex chars,
+# and uint32 decimal IDs need 10 digits; 32 leaves room for leading-zero padding.
+_MAX_PUBLIC_HEX_CHARS: Final[int] = HEX_CHARS
 _MAX_DECIMAL_ID_STRING_CHARS: Final[int] = 32
+_MAX_LABEL_FILE_BYTES: Final[int] = 2000
+
+_LABELS_BY_NAME: dict[str, int] = {}
+_LABEL_NAMES_BY_ID: dict[int, str] = {}
 
 __all__ = [
     "ACTIVE_DECODE_VERSIONS",
-    "DEFAULT_BOOSTED",
     "DEFAULT_LAYOUT",
-    "DEFAULT_PROFILE",
     "DOMAIN_SALT_HEX",
     "ENV_PASSWORD_NAME",
+    "HEX_CHARS",
     "ID_BITS",
     "ISSUE_VERSION",
-    "LAYOUTS",
-    "LAYOUTS_BY_HEX_LENGTH",
-    "LAYOUTS_BY_PROFILE_MODE",
+    "LABEL_BITS",
+    "LAYOUT",
     "MAX_ID",
+    "MAX_LABEL",
     "MIN_ID",
     "MIN_PASSWORD_BYTES",
     "MYSQL_UNSIGNED_INT_MAX",
+    "NO_LABEL",
+    "RESERVED_LABEL",
+    "RESERVED_VERSION",
     "ROUNDS",
-    "SUPPORTED_HEX_LENGTHS",
-    "SUPPORTED_PROFILES",
     "SCHEME_REVISION",
+    "SUPPORTED_HEX_LENGTHS",
     "SqlIdLayout",
     "SqlIdValidation",
     "TAG_BITS",
+    "TOTAL_BITS",
     "VERSION_BITS",
-    "available_layouts",
+    "available_labels",
+    "clear_sql_id_labels",
+    "configure_sql_id_labels",
     "hex_to_id",
+    "hex_to_id_label",
     "hex_to_parts",
     "id_to_hex",
+    "id_to_hex_label",
+    "inspect_hex",
     "is_configured",
     "layout_for_hex_length",
-    "layout_for_profile",
+    "load_sql_id_labels_from_file",
     "sql_decode_id",
+    "sql_decode_id_label",
     "sql_generate_id",
+    "sql_generate_id_label",
     "sql_validate_id",
+    "sql_validate_id_label",
     "validate_hex",
+    "validate_hex_label",
 ]
 
 
 class _ConfigError(ValueError):
-    """Internal configuration error surfaced by validate_hex()."""
+    """Internal configuration error surfaced by validation helpers."""
 
 
 class _InputError(ValueError):
@@ -334,108 +307,232 @@ class _ValidationFailure(ValueError):
 
 
 def _registry_is_sane() -> bool:
-    """Return True when the fixed layout registry is internally consistent."""
-    if VERSION_BITS != 4:
-        return False
-    if not 0 <= ISSUE_VERSION <= ((1 << VERSION_BITS) - 1):
-        return False
-    if ISSUE_VERSION not in ACTIVE_DECODE_VERSIONS:
-        return False
-    if ACTIVE_DECODE_VERSIONS != frozenset({ISSUE_VERSION}):
-        return False
+    """Return True when the fixed layout and reserved ranges are consistent."""
     if len(_DOMAIN_SALT) != 32:
         return False
     if ROUNDS < 12:
         return False
-    if MIN_ID != 1:
+    if VERSION_BITS != 3 or LABEL_BITS != 5 or ID_BITS != 32 or TAG_BITS != 24:
         return False
-    if MYSQL_UNSIGNED_INT_MAX != (1 << 32) - 1:
+    if TOTAL_BITS != VERSION_BITS + LABEL_BITS + ID_BITS + TAG_BITS:
         return False
-    if DEFAULT_LAYOUT.profile != "uint32" or DEFAULT_LAYOUT.mode != "normal":
+    if TOTAL_BITS != 64 or HEX_CHARS != 16:
         return False
-    if DEFAULT_LAYOUT.total_bits != 64 or DEFAULT_LAYOUT.hex_chars != 16:
+    if DEFAULT_LAYOUT.total_bits != TOTAL_BITS or DEFAULT_LAYOUT.hex_chars != HEX_CHARS:
         return False
-    if DEFAULT_LAYOUT.id_bits != 32 or DEFAULT_LAYOUT.tag_bits != 28:
+    if DEFAULT_LAYOUT.bytes != 8 or DEFAULT_LAYOUT.half_bits != 32:
         return False
-    if len(LAYOUTS) != 12:
+    if not 1 <= ISSUE_VERSION < RESERVED_VERSION:
         return False
-    if len(LAYOUTS_BY_PROFILE_MODE) != len(LAYOUTS):
+    if ACTIVE_DECODE_VERSIONS != frozenset({ISSUE_VERSION}):
         return False
-    if len(LAYOUTS_BY_HEX_LENGTH) != len(LAYOUTS):
+    if NO_LABEL != 0 or RESERVED_LABEL != 31 or MAX_LABEL != 30:
+        return False
+    if MIN_ID != 1 or MAX_ID != (1 << 32) - 1:
+        return False
+    if MYSQL_UNSIGNED_INT_MAX != MAX_ID:
+        return False
+    if SUPPORTED_HEX_LENGTHS != (16,):
         return False
 
-    expected_profiles = set(SUPPORTED_PROFILES)
-    seen_profiles = {layout.profile for layout in LAYOUTS}
-    if seen_profiles != expected_profiles:
+    layout = DEFAULT_LAYOUT
+    if layout.version_bits + layout.label_bits + layout.id_bits + layout.tag_bits != layout.total_bits:
         return False
-
-    for profile in SUPPORTED_PROFILES:
-        if (profile, "normal") not in LAYOUTS_BY_PROFILE_MODE:
-            return False
-        if (profile, "boosted") not in LAYOUTS_BY_PROFILE_MODE:
-            return False
-
-    for layout in LAYOUTS:
-        if layout.mode not in {"normal", "boosted"}:
-            return False
-        if layout.version_bits != VERSION_BITS:
-            return False
-        if layout.total_bits != layout.version_bits + layout.id_bits + layout.tag_bits:
-            return False
-        if layout.total_bits % 8 != 0:
-            return False
-        if layout.total_bits % 2 != 0:
-            return False
-        if layout.hex_chars != layout.total_bits // 4:
-            return False
-        if layout.bytes * 8 != layout.total_bits:
-            return False
-        if not layout.profile.startswith("uint"):
-            return False
-        try:
-            profile_bits = int(layout.profile[4:])
-        except ValueError:
-            return False
-        if profile_bits != layout.id_bits:
-            return False
-        if layout.max_id != (1 << layout.id_bits) - 1:
-            return False
-        if layout.max_id < MIN_ID:
-            return False
-        if layout.mode == "normal" and layout.tag_bits != 28:
-            return False
-        if layout.mode == "boosted" and layout.tag_bits < 60:
-            return False
-        if layout.half_bits > 256:
-            return False
+    if layout.total_bits % 8 != 0 or layout.total_bits % 2 != 0:
+        return False
+    if layout.hex_chars != layout.total_bits // 4:
+        return False
+    if layout.max_id != MAX_ID:
+        return False
+    if layout.version_mask != RESERVED_VERSION:
+        return False
+    if layout.label_mask != RESERVED_LABEL:
+        return False
+    if layout.half_bits > 256:
+        return False
 
     return True
 
 
 # Backwards-readable name for tests and users who introspect internals.
 def _constants_are_sane() -> bool:
-    """Return True when constants and the fixed registry are valid."""
+    """Return True when constants and the fixed layout are valid."""
     return _registry_is_sane()
 
 
-def available_layouts() -> tuple[SqlIdLayout, ...]:
-    """Return the fixed supported layouts."""
-    return LAYOUTS
-
-
-def layout_for_profile(profile: object = DEFAULT_PROFILE, *, boosted: object = DEFAULT_BOOSTED) -> SqlIdLayout | None:
-    """Return the layout for a fixed profile/mode, or None for invalid input."""
-    try:
-        return _resolve_layout(profile, boosted=boosted)
-    except Exception:
-        return None
-
-
 def layout_for_hex_length(hex_chars: object) -> SqlIdLayout | None:
-    """Return the unique decode layout for a public hex length, or None."""
+    """Return the fixed layout for 16 hex chars, or None."""
     if isinstance(hex_chars, bool) or not isinstance(hex_chars, int):
         return None
-    return LAYOUTS_BY_HEX_LENGTH.get(hex_chars)
+    return DEFAULT_LAYOUT if hex_chars == HEX_CHARS else None
+
+
+def _normalize_label_name(name: str) -> str:
+    normalized = name.lower()
+    if not _LABEL_NAME_RE.fullmatch(normalized):
+        raise _InputError("label names must match [a-z][a-z0-9_]{0,31}")
+    return normalized
+
+
+def _validate_label_id(label_id: object, *, allow_zero: bool) -> int:
+    if isinstance(label_id, bool) or not isinstance(label_id, int):
+        raise _InputError("label must be an int label id or configured label name")
+    minimum = NO_LABEL if allow_zero else 1
+    if not minimum <= label_id <= MAX_LABEL:
+        if allow_zero:
+            raise _InputError(f"label id must be {NO_LABEL}..{MAX_LABEL}")
+        raise _InputError(f"label id must be 1..{MAX_LABEL}")
+    return label_id
+
+
+def _coerce_label(label: object, *, allow_zero: bool) -> int:
+    """Resolve an int label id or configured label name into label bits."""
+    if isinstance(label, str):
+        normalized = _normalize_label_name(label)
+        try:
+            return _LABELS_BY_NAME[normalized]
+        except KeyError as exc:
+            raise _InputError(f"unknown SQL ID label: {label!r}") from exc
+    return _validate_label_id(label, allow_zero=allow_zero)
+
+
+def configure_sql_id_labels(labels: Mapping[str, int]) -> None:
+    """Configure local names for label IDs 1..30.
+
+    This lookup is local metadata only. The public ID stores the numeric label
+    bits, not the label name. Configure labels once during application startup.
+    """
+    if not isinstance(labels, Mapping):
+        raise ValueError("labels must be a mapping of name -> label id")
+
+    by_name: dict[str, int] = {}
+    by_id: dict[int, str] = {}
+    for raw_name, raw_id in labels.items():
+        if not isinstance(raw_name, str):
+            raise ValueError("label names must be strings")
+        try:
+            name = _normalize_label_name(raw_name)
+            label_id = _validate_label_id(raw_id, allow_zero=False)
+        except _InputError as exc:
+            raise ValueError(str(exc)) from exc
+        if name in by_name:
+            raise ValueError(f"duplicate label name after normalization: {raw_name!r}")
+        if label_id in by_id:
+            raise ValueError(f"duplicate label id: {label_id}")
+        by_name[name] = label_id
+        by_id[label_id] = name
+
+    _LABELS_BY_NAME.clear()
+    _LABELS_BY_NAME.update(by_name)
+    _LABEL_NAMES_BY_ID.clear()
+    _LABEL_NAMES_BY_ID.update(by_id)
+
+
+def _labels_from_loaded_data(data: object) -> dict[str, int]:
+    """Normalize loaded label data into the public name -> id mapping."""
+    if not isinstance(data, Mapping):
+        raise ValueError("label file must contain a mapping")
+
+    labels: dict[str, int] = {}
+    for raw_key, raw_value in data.items():
+        if (
+            (isinstance(raw_key, str) and raw_key.isdecimal()) or isinstance(raw_key, int)
+        ) and isinstance(raw_value, str):
+            name = raw_value
+            label_id = int(raw_key)
+        else:
+            name = raw_key
+            label_id = raw_value
+        if not isinstance(name, str):
+            raise ValueError("label file names must be strings")
+        labels[name] = label_id
+    return labels
+
+
+def _candidate_label_paths(path: Path) -> tuple[Path, ...]:
+    """Return existing same-stem JSON/YAML label files for comparison."""
+    suffix = path.suffix.lower()
+    if suffix not in {".json", ".yaml", ".yml"}:
+        raise ValueError("label file must use .json, .yaml, or .yml")
+
+    candidates = []
+    for candidate_suffix in (".json", ".yaml", ".yml"):
+        candidate = path.with_suffix(candidate_suffix)
+        if candidate.exists():
+            candidates.append(candidate)
+    if path not in candidates:
+        candidates.append(path)
+    return tuple(dict.fromkeys(candidates))
+
+
+def _load_one_label_file(path: Path) -> dict[str, int]:
+    """Load one label file, enforce size, and return a normalized mapping."""
+    suffix = path.suffix.lower()
+    try:
+        if path.stat().st_size > _MAX_LABEL_FILE_BYTES:
+            raise ValueError(f"label file is too large; maximum is {_MAX_LABEL_FILE_BYTES} bytes")
+        if suffix == ".json":
+            with path.open("r", encoding="utf-8") as file_obj:
+                data = json.load(file_obj)
+        elif suffix in {".yaml", ".yml"}:
+            try:
+                import yaml  # type: ignore[import-not-found]
+            except ImportError as exc:
+                raise ValueError("YAML label files require the optional PyYAML package") from exc
+            with path.open("r", encoding="utf-8") as file_obj:
+                data = yaml.safe_load(file_obj)
+        else:
+            raise ValueError("label file must use .json, .yaml, or .yml")
+    except OSError as exc:
+        raise ValueError(f"could not read label file: {exc}") from exc
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"invalid JSON label file: {exc}") from exc
+
+    labels = _labels_from_loaded_data(data)
+    # Reuse the public validator on a temporary copy before returning.
+    old_labels = available_labels()
+    try:
+        configure_sql_id_labels(labels)
+        return available_labels()
+    finally:
+        configure_sql_id_labels(old_labels)
+
+
+def load_sql_id_labels_from_file(path: str | os.PathLike[str]) -> None:
+    """Load label names from JSON/YAML files and configure them.
+
+    JSON support uses the Python standard library. YAML support is optional and
+    requires PyYAML to be installed. Supported mapping shapes are:
+
+        {"dry_run": 1, "plan": 2}
+        {"1": "dry_run", "2": "plan"}
+
+    If same-stem JSON and YAML files both exist, all available files are loaded
+    and must normalize to the same label registry. Each file must be no larger
+    than 2000 bytes.
+    """
+    label_path = Path(path)
+    loaded = [(candidate, _load_one_label_file(candidate)) for candidate in _candidate_label_paths(label_path)]
+    first_path, first_labels = loaded[0]
+    for candidate, labels in loaded[1:]:
+        if labels != first_labels:
+            raise ValueError(f"label files do not match: {first_path} and {candidate}")
+    configure_sql_id_labels(first_labels)
+
+
+def clear_sql_id_labels() -> None:
+    """Clear the local label-name lookup."""
+    _LABELS_BY_NAME.clear()
+    _LABEL_NAMES_BY_ID.clear()
+
+
+def available_labels() -> dict[str, int]:
+    """Return a copy of the configured local label-name lookup."""
+    return dict(_LABELS_BY_NAME)
+
+
+def _label_name_for_id(label_id: int) -> str | None:
+    return _LABEL_NAMES_BY_ID.get(label_id)
 
 
 def _password_bytes() -> bytes:
@@ -452,12 +549,12 @@ def _password_bytes() -> bytes:
     return password_bytes
 
 
-@lru_cache(maxsize=64)
+@lru_cache(maxsize=16)
 def _derive_material(password_bytes: bytes, layout: SqlIdLayout) -> tuple[tuple[bytes, ...], bytes]:
     """Derive layout-specific Feistel round keys and validation-tag key."""
     seed = hmac.new(
         password_bytes,
-        _DOMAIN_SALT + b":xctx-sql-id-layout-registry:" + layout.domain_label() + b":seed:",
+        _DOMAIN_SALT + b":xctx-sql-id-label-layout:" + layout.domain_label() + b":seed:",
         hashlib.sha256,
     ).digest()
 
@@ -479,9 +576,9 @@ def _derive_material(password_bytes: bytes, layout: SqlIdLayout) -> tuple[tuple[
 
 
 def _key_material(layout: SqlIdLayout = DEFAULT_LAYOUT) -> tuple[tuple[bytes, ...], bytes]:
-    """Return configured key material for a layout or raise an internal error."""
-    if not _registry_is_sane():
-        raise _ConfigError("invalid sql_id_library layout registry")
+    """Return configured key material for the fixed layout or raise an error."""
+    if layout != DEFAULT_LAYOUT or not _registry_is_sane():
+        raise _ConfigError("invalid sql_id_library layout")
     return _derive_material(_password_bytes(), layout)
 
 
@@ -494,21 +591,8 @@ def is_configured() -> bool:
         return False
 
 
-def _resolve_layout(profile: object = DEFAULT_PROFILE, *, boosted: object = DEFAULT_BOOSTED) -> SqlIdLayout:
-    """Strictly resolve public profile/mode arguments into a fixed layout."""
-    if not isinstance(profile, str):
-        raise _InputError("profile must be one of: " + ", ".join(SUPPORTED_PROFILES))
-    profile_key = profile.lower()
-    if profile_key not in SUPPORTED_PROFILES:
-        raise _InputError("profile must be one of: " + ", ".join(SUPPORTED_PROFILES))
-    if not isinstance(boosted, bool):
-        raise _InputError("boosted must be a bool")
-    mode = "boosted" if boosted else "normal"
-    return LAYOUTS_BY_PROFILE_MODE[(profile_key, mode)]
-
-
-def _coerce_id(value: object, layout: SqlIdLayout) -> int:
-    """Strictly coerce a public input into an integer SQL ID for a layout."""
+def _coerce_id(value: object, layout: SqlIdLayout = DEFAULT_LAYOUT) -> int:
+    """Strictly coerce a public input into an integer SQL ID."""
     if isinstance(value, bool):
         raise _InputError("bool is not an id")
     if isinstance(value, int):
@@ -521,13 +605,13 @@ def _coerce_id(value: object, layout: SqlIdLayout) -> int:
         max_digits = len(str(layout.max_id))
         significant_digits = value.lstrip("0") or "0"
         if len(significant_digits) > max_digits:
-            raise _InputError("id string too long for profile")
+            raise _InputError("id string too long for uint32 range")
         id_value = int(value)
     else:
         raise _InputError("id must be an int or decimal digit string")
 
     if not MIN_ID <= id_value <= layout.max_id:
-        raise _InputError(f"id is outside profile range 1..{layout.max_id}")
+        raise _InputError(f"id is outside range 1..{layout.max_id}")
     return id_value
 
 
@@ -537,7 +621,7 @@ def _round_function(right: int, key: bytes, layout: SqlIdLayout) -> int:
     return int.from_bytes(digest[: layout.half_bytes], "big") & layout.half_mask
 
 
-def _feistel_encrypt(value: int, round_keys: tuple[bytes, ...], layout: SqlIdLayout) -> int:
+def _feistel_encrypt(value: int, round_keys: tuple[bytes, ...], layout: SqlIdLayout = DEFAULT_LAYOUT) -> int:
     """Encrypt one layout-width integer using the secret-derived Feistel PRP."""
     if not 0 <= value <= layout.value_mask:
         raise ValueError("value is outside layout range")
@@ -551,7 +635,7 @@ def _feistel_encrypt(value: int, round_keys: tuple[bytes, ...], layout: SqlIdLay
     return ((left << layout.half_bits) | right) & layout.value_mask
 
 
-def _feistel_decrypt(value: int, round_keys: tuple[bytes, ...], layout: SqlIdLayout) -> int:
+def _feistel_decrypt(value: int, round_keys: tuple[bytes, ...], layout: SqlIdLayout = DEFAULT_LAYOUT) -> int:
     """Decrypt one layout-width integer using the secret-derived Feistel PRP."""
     if not 0 <= value <= layout.value_mask:
         raise ValueError("value is outside layout range")
@@ -565,21 +649,12 @@ def _feistel_decrypt(value: int, round_keys: tuple[bytes, ...], layout: SqlIdLay
     return ((left << layout.half_bits) | right) & layout.value_mask
 
 
-# Compatibility-shaped private helpers for the default uint32 normal layout.
-def _feistel_encrypt64(value: int, round_keys: tuple[bytes, ...]) -> int:
-    """Encrypt one default-layout 64-bit integer."""
-    return _feistel_encrypt(value, round_keys, DEFAULT_LAYOUT)
-
-
-def _feistel_decrypt64(value: int, round_keys: tuple[bytes, ...]) -> int:
-    """Decrypt one default-layout 64-bit integer."""
-    return _feistel_decrypt(value, round_keys, DEFAULT_LAYOUT)
-
-
-def _tag(version: int, id_index: int, tag_key: bytes, layout: SqlIdLayout) -> int:
-    """Return a keyed validation tag for the layout/version/id-index tuple."""
+def _tag(version: int, label_id: int, id_index: int, tag_key: bytes, layout: SqlIdLayout = DEFAULT_LAYOUT) -> int:
+    """Return a keyed validation tag for version, label, and id-index."""
     if not 0 <= version <= layout.version_mask:
         raise ValueError("version out of range")
+    if not 0 <= label_id <= layout.label_mask:
+        raise ValueError("label out of range")
     if not 0 <= id_index <= layout.id_mask:
         raise ValueError("id index out of range")
 
@@ -587,16 +662,13 @@ def _tag(version: int, id_index: int, tag_key: bytes, layout: SqlIdLayout) -> in
         layout.domain_label()
         + b":version:"
         + version.to_bytes(1, "big")
+        + b":label:"
+        + label_id.to_bytes(1, "big")
         + b":id-index:"
         + id_index.to_bytes(layout.id_bytes, "big")
     )
     digest = hmac.new(tag_key, message, hashlib.sha256).digest()
     return int.from_bytes(digest[: layout.tag_bytes], "big") & layout.tag_mask
-
-
-def _tag28(version: int, id_index: int, tag_key: bytes) -> int:
-    """Return a default-layout 28-bit validation tag."""
-    return _tag(version, id_index, tag_key, DEFAULT_LAYOUT)
 
 
 def _tags_equal(left: int, right: int, layout: SqlIdLayout = DEFAULT_LAYOUT) -> bool:
@@ -607,63 +679,75 @@ def _tags_equal(left: int, right: int, layout: SqlIdLayout = DEFAULT_LAYOUT) -> 
     )
 
 
-def _pack_plain(version: int, id_index: int, tag_key: bytes, layout: SqlIdLayout) -> int:
-    """Pack version, zero-based SQL ID index, and keyed tag into layout bits."""
+def _pack_plain(
+    version: int,
+    label_id: int,
+    id_index: int,
+    tag_key: bytes,
+    layout: SqlIdLayout = DEFAULT_LAYOUT,
+) -> int:
+    """Pack version, label, zero-based ID index, and keyed tag into 64 bits."""
     if not 0 <= version <= layout.version_mask:
         raise ValueError("version out of range")
+    if not 0 <= label_id <= layout.label_mask:
+        raise ValueError("label out of range")
     if not 0 <= id_index < layout.max_id:
         raise ValueError("id index out of public range")
 
-    tag = _tag(version, id_index, tag_key, layout)
+    tag = _tag(version, label_id, id_index, tag_key, layout)
     return (
-        ((version & layout.version_mask) << (layout.id_bits + layout.tag_bits))
+        ((version & layout.version_mask) << (layout.label_bits + layout.id_bits + layout.tag_bits))
+        | ((label_id & layout.label_mask) << (layout.id_bits + layout.tag_bits))
         | ((id_index & layout.id_mask) << layout.tag_bits)
         | tag
     ) & layout.value_mask
 
 
-def _unpack_plain(value: int, layout: SqlIdLayout) -> tuple[int, int, int]:
-    """Unpack a layout-width integer into version, zero-based ID index, and tag."""
+def _unpack_plain(value: int, layout: SqlIdLayout = DEFAULT_LAYOUT) -> tuple[int, int, int, int]:
+    """Unpack a 64-bit plaintext value into version, label, id-index, and tag."""
     if not 0 <= value <= layout.value_mask:
         raise ValueError("value is outside layout range")
 
-    version = (value >> (layout.id_bits + layout.tag_bits)) & layout.version_mask
+    version = (value >> (layout.label_bits + layout.id_bits + layout.tag_bits)) & layout.version_mask
+    label_id = (value >> (layout.id_bits + layout.tag_bits)) & layout.label_mask
     id_index = (value >> layout.tag_bits) & layout.id_mask
     tag = value & layout.tag_mask
-    return version, id_index, tag
+    return version, label_id, id_index, tag
 
 
-def _pack_plain64(version: int, id_index: int, tag_key: bytes) -> int:
-    """Pack a default-layout 64-bit plaintext value."""
-    return _pack_plain(version, id_index, tag_key, DEFAULT_LAYOUT)
-
-
-def _unpack_plain64(value: int) -> tuple[int, int, int]:
-    """Unpack a default-layout 64-bit plaintext value."""
-    return _unpack_plain(value, DEFAULT_LAYOUT)
-
-
-def id_to_hex(value: object, *, profile: object = DEFAULT_PROFILE, boosted: object = DEFAULT_BOOSTED) -> str | None:
-    """Return a lowercase public hex ID for an integer, or None on any failure."""
+def _encode_with_label(id_value: object, label_id: int) -> str | None:
     try:
-        layout = _resolve_layout(profile, boosted=boosted)
-        id_value = _coerce_id(value, layout)
-        round_keys, tag_key = _key_material(layout)
-        plain = _pack_plain(ISSUE_VERSION, id_value - 1, tag_key, layout)
-        encrypted = _feistel_encrypt(plain, round_keys, layout)
-        return f"{encrypted:0{layout.hex_chars}x}"
+        sql_id = _coerce_id(id_value, DEFAULT_LAYOUT)
+        round_keys, tag_key = _key_material(DEFAULT_LAYOUT)
+        plain = _pack_plain(ISSUE_VERSION, label_id, sql_id - 1, tag_key, DEFAULT_LAYOUT)
+        encrypted = _feistel_encrypt(plain, round_keys, DEFAULT_LAYOUT)
+        return f"{encrypted:0{HEX_CHARS}x}"
     except Exception:  # noqa: BLE001 - public convenience API returns None
         return None
 
 
-def sql_generate_id(
-    id_required: object,
-    *,
-    profile: object = DEFAULT_PROFILE,
-    boosted: object = DEFAULT_BOOSTED,
-) -> str | None:
-    """Alias for id_to_hex(): give me hex from an id."""
-    return id_to_hex(id_required, profile=profile, boosted=boosted)
+def id_to_hex(value: object) -> str | None:
+    """Return an unlabeled lowercase public hex ID, or None on any failure."""
+    return _encode_with_label(value, NO_LABEL)
+
+
+def id_to_hex_label(value: object, label: object) -> str | None:
+    """Return a labeled lowercase public hex ID for label IDs 1..30."""
+    try:
+        label_id = _coerce_label(label, allow_zero=False)
+    except Exception:
+        return None
+    return _encode_with_label(value, label_id)
+
+
+def sql_generate_id(id_required: object) -> str | None:
+    """Alias for id_to_hex(): give me unlabeled hex from an id."""
+    return id_to_hex(id_required)
+
+
+def sql_generate_id_label(id_required: object, label: object) -> str | None:
+    """Alias for id_to_hex_label(): give me labeled hex from an id."""
+    return id_to_hex_label(id_required, label)
 
 
 def _validation_error(
@@ -673,12 +757,13 @@ def _validation_error(
     public_hex: str | None = None,
     layout: SqlIdLayout | None = None,
     version: int | None = None,
+    label_id: int | None = None,
 ) -> SqlIdValidation:
     return SqlIdValidation(
         ok=False,
         public_hex=public_hex,
-        profile=layout.profile if layout else None,
-        mode=layout.mode if layout else None,
+        label_id=label_id,
+        label=_label_name_for_id(label_id) if label_id is not None else None,
         version=version,
         layout=layout,
         error_code=code,
@@ -693,23 +778,15 @@ def _public_hex_for_length_error(value: str) -> str | None:
     return value.lower()
 
 
-def _decode_public_hex(value: object) -> SqlIdValidation:
-    """Decode and validate a public hex ID, returning success or failure detail."""
+def _decode_public_hex(value: object, *, expected_label: int | None) -> SqlIdValidation:
+    """Decode and validate a public hex ID, optionally requiring one exact label."""
     if not isinstance(value, str):
         return _validation_error("not_string", "public id must be a hex string")
 
-    if value == "":
+    if len(value) != HEX_CHARS:
         return _validation_error(
             "unsupported_length",
-            "public id length must be one of: " + ", ".join(map(str, SUPPORTED_HEX_LENGTHS)),
-            public_hex=value,
-        )
-
-    layout = LAYOUTS_BY_HEX_LENGTH.get(len(value))
-    if layout is None:
-        return _validation_error(
-            "unsupported_length",
-            "public id length must be one of: " + ", ".join(map(str, SUPPORTED_HEX_LENGTHS)),
+            f"public id length must be exactly {HEX_CHARS} hex characters",
             public_hex=_public_hex_for_length_error(value),
         )
 
@@ -719,65 +796,105 @@ def _decode_public_hex(value: object) -> SqlIdValidation:
     public_hex = value.lower()
 
     try:
-        round_keys, tag_key = _key_material(layout)
+        round_keys, tag_key = _key_material(DEFAULT_LAYOUT)
         encrypted = int(public_hex, 16)
-        plain = _feistel_decrypt(encrypted, round_keys, layout)
-        version, id_index, supplied_tag = _unpack_plain(plain, layout)
+        plain = _feistel_decrypt(encrypted, round_keys, DEFAULT_LAYOUT)
+        version, label_id, id_index, supplied_tag = _unpack_plain(plain, DEFAULT_LAYOUT)
 
+        expected_tag = _tag(version, label_id, id_index, tag_key, DEFAULT_LAYOUT)
+        if not _tags_equal(supplied_tag, expected_tag, DEFAULT_LAYOUT):
+            raise _ValidationFailure("tag_mismatch", "public id validation tag does not match")
         if version not in ACTIVE_DECODE_VERSIONS:
             raise _ValidationFailure("unsupported_version", "public id uses an inactive version")
-        if not 0 <= id_index < layout.max_id:
-            raise _ValidationFailure("id_out_of_range", "decoded id is outside this profile's public range")
-
-        expected_tag = _tag(version, id_index, tag_key, layout)
-        if not _tags_equal(supplied_tag, expected_tag, layout):
-            raise _ValidationFailure("tag_mismatch", "public id validation tag does not match")
+        if label_id == RESERVED_LABEL:
+            raise _ValidationFailure("reserved_label", "public id uses a reserved label")
+        if expected_label is not None and label_id != expected_label:
+            raise _ValidationFailure("label_mismatch", "public id label does not match the expected label")
+        if not 0 <= id_index < DEFAULT_LAYOUT.max_id:
+            raise _ValidationFailure("id_out_of_range", "decoded id is outside the public range")
 
         id_value = id_index + 1
-        if not MIN_ID <= id_value <= layout.max_id:
-            raise _ValidationFailure("id_out_of_range", "decoded id is outside this profile's public range")
+        if not MIN_ID <= id_value <= DEFAULT_LAYOUT.max_id:
+            raise _ValidationFailure("id_out_of_range", "decoded id is outside the public range")
 
         return SqlIdValidation(
             ok=True,
             id=id_value,
             public_hex=public_hex,
-            profile=layout.profile,
-            mode=layout.mode,
+            label_id=label_id,
+            label=_label_name_for_id(label_id),
             version=version,
-            layout=layout,
+            layout=DEFAULT_LAYOUT,
         )
     except _ConfigError as exc:
-        return _validation_error("bad_config", str(exc), public_hex=public_hex, layout=layout)
+        return _validation_error("bad_config", str(exc), public_hex=public_hex, layout=DEFAULT_LAYOUT)
     except _ValidationFailure as exc:
-        return _validation_error(exc.code, exc.message, public_hex=public_hex, layout=layout)
+        return _validation_error(
+            exc.code,
+            exc.message,
+            public_hex=public_hex,
+            layout=DEFAULT_LAYOUT,
+            version=locals().get("version"),
+            label_id=locals().get("label_id"),
+        )
     except Exception as exc:  # noqa: BLE001 - validation returns a real error, not an exception
-        return _validation_error("internal_error", f"internal validation failure: {exc}", public_hex=public_hex, layout=layout)
+        return _validation_error("internal_error", f"internal validation failure: {exc}", public_hex=public_hex, layout=DEFAULT_LAYOUT)
 
 
 def validate_hex(value: object) -> SqlIdValidation:
-    """Validate a public hex ID and return structured success/error detail."""
-    return _decode_public_hex(value)
+    """Validate an unlabeled public ID and return structured detail."""
+    return _decode_public_hex(value, expected_label=NO_LABEL)
+
+
+def validate_hex_label(value: object, label: object) -> SqlIdValidation:
+    """Validate a labeled public ID against one exact expected label."""
+    try:
+        expected_label = _coerce_label(label, allow_zero=False)
+    except _InputError as exc:
+        return _validation_error("invalid_label", str(exc))
+    return _decode_public_hex(value, expected_label=expected_label)
+
+
+def inspect_hex(value: object) -> SqlIdValidation:
+    """Inspect any valid non-reserved label. Do not use as route enforcement."""
+    return _decode_public_hex(value, expected_label=None)
 
 
 def sql_validate_id(value: object) -> SqlIdValidation:
-    """Alias for validate_hex(): validate a hex and report a real error."""
+    """Alias for validate_hex(): validate an unlabeled public ID."""
     return validate_hex(value)
 
 
+def sql_validate_id_label(value: object, label: object) -> SqlIdValidation:
+    """Alias for validate_hex_label(): validate a labeled public ID."""
+    return validate_hex_label(value, label)
+
+
 def hex_to_id(value: object) -> int | None:
-    """Return the original integer for a public hex ID, or None on any failure."""
+    """Return the integer for an unlabeled public ID, or None on any failure."""
     result = validate_hex(value)
     return result.id if result.ok else None
 
 
+def hex_to_id_label(value: object, label: object) -> int | None:
+    """Return the integer for a public ID with the exact expected label."""
+    result = validate_hex_label(value, label)
+    return result.id if result.ok else None
+
+
 def sql_decode_id(value: object) -> int | None:
-    """Alias for hex_to_id(): give me id from a hex."""
+    """Alias for hex_to_id(): give me an id from unlabeled hex."""
     return hex_to_id(value)
 
 
-def hex_to_parts(value: object) -> tuple[str, str, int, int] | None:
-    """Return (profile, mode, version, integer_id) for a valid public ID, or None."""
-    result = validate_hex(value)
-    if not result.ok or result.id is None or result.profile is None or result.mode is None or result.version is None:
+def sql_decode_id_label(value: object, label: object) -> int | None:
+    """Alias for hex_to_id_label(): give me an id from labeled hex."""
+    return hex_to_id_label(value, label)
+
+
+def hex_to_parts(value: object) -> tuple[int, str | None, int, int] | None:
+    """Return (label_id, label_name, version, integer_id) for any valid ID."""
+    result = inspect_hex(value)
+    if not result.ok or result.id is None or result.label_id is None or result.version is None:
         return None
-    return result.profile, result.mode, result.version, result.id
+    return result.label_id, result.label, result.version, result.id

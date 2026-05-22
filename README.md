@@ -1,272 +1,199 @@
-`Absolutely. Here’s the rewritten version as **one coherent website page**, with the SQL argument as the spine and versioning baked into the model instead of bolted on.`:
-
----
-
 # SQL integers inside. Public hex outside.
 
-Relational databases are very good at integer primary keys.
-
-They are small.
-They are fast.
-They index well.
-They join well.
-They store cheaply in foreign keys.
-
-But raw integer IDs are not always what you want to expose to the world.
-
-Customers, agents, APIs, webhooks, audit trails, logs, support tools, and external systems often need a public identifier: something compact, stable, copyable, and safe to pass around.
-
-`sql_id_library` gives you both.
+`sql_id_library` keeps your database on compact integer primary keys while the
+outside world sees deterministic, secret-keyed, reversible public handles.
 
 ```python
+from sql_id_library import hex_to_id, id_to_hex
+
 public_id = id_to_hex(order.id)
 order_id = hex_to_id(public_id)
 ```
 
-Your database keeps the integer.
-The outside world gets the hex.
+The public ID is always:
+
+```text
+16 lowercase hex characters
+```
 
 No UUID primary keys.
 No public-ID lookup table.
 No exposed sequential IDs.
 
-Just a fast SQL key with a clean public handle.
+---
+
+## Bit Layout
+
+The current format uses the full 64-bit / 16-hex-character budget:
+
+```text
+3 version bits + 5 label bits + 32 id bits + 24 keyed tag bits = 64 bits
+```
+
+Plain value before encryption:
+
+```text
+[ version ][ label ][ zero-based SQL id index ][ keyed validation tag ]
+```
+
+Then the whole 64-bit value is passed through a secret-keyed Feistel permutation
+and encoded as lowercase hex.
+
+Capacity:
+
+| Field   | Values                                      |
+| ------- | ------------------------------------------- |
+| Version | `0..7`; issues `1`, reserves `0` and `7`    |
+| Label   | `0` means no label, `1..30` named, `31` reserved |
+| SQL ID  | `1..4,294,967,295`                          |
+| Tag     | 24 keyed validation bits                    |
 
 ---
 
-## The problem with public IDs as primary keys
+## Unlabeled API
 
-UUIDs and long random hex strings are convenient public identifiers.
-
-That is why people use them.
-
-They look good in URLs.
-They are easy to hand to other systems.
-They avoid obvious sequential IDs.
-They work well in distributed environments.
-
-But once you make them your SQL primary key, they become part of every index, every join, and every foreign key that depends on them.
-
-That has a cost.
-
-A string key is wider than an integer key.
-It takes more space to index.
-It takes more space to repeat in child tables.
-It is less cache-friendly.
-It can make inserts, joins, and lookups more expensive than they need to be.
-
-Sometimes that trade-off is worth it.
-
-Often it is just habit.
-
-If your database can use an integer primary key, let it.
-
-Then expose something better at the boundary.
-
----
-
-## The model
-
-Inside SQL:
-
-```text
-123
-```
-
-Outside SQL:
-
-```text
-8f32c4a91b7e05d2
-```
-
-The public handle is deterministic, secret-keyed, versioned, tamper-resistant, and reversible by your application.
-
-When a handle comes back in:
+Use this when you just want the old simple behavior:
 
 ```python
-sql_id = hex_to_id(public_id)
-```
-
-Then your application does the normal database thing:
-
-```text
-decode public handle
-load row by integer primary key
-check authorization
-perform the action
-```
-
-The public ID is not a permission token.
-
-It is not a session token.
-
-It is not a bearer credential.
-
-It is a public reference to a row.
-
-A better one.
-
----
-
-# Usage
-
-```python
-from sql_id_library import id_to_hex, hex_to_id, validate_hex
+from sql_id_library import id_to_hex, hex_to_id
 
 public_hex = id_to_hex(123)
 id_value = hex_to_id(public_hex)
-result = validate_hex(public_hex)
 ```
 
-By default, `id_to_hex()` uses the `uint32` normal profile.
-
-That gives you:
+`hex_to_id()` only accepts public IDs with:
 
 ```text
-SQL IDs:   1 to 4,294,967,295
-Handle:    16 lowercase hex characters
-Mode:      normal
+label = 0
 ```
 
-For many systems, that is the right default.
-
-Large enough to be useful.
-Short enough to be pleasant.
-Simple enough to forget about.
+If you pass a labeled public ID to `hex_to_id()`, it returns `None`.
 
 ---
 
-## Profiles
+## Labeled API
 
-Profiles define how many SQL IDs can be represented and how long the public handle will be.
-
-| Profile  |                 Max SQL ID | Normal handle | Boosted handle |
-| -------- | -------------------------: | ------------: | -------------: |
-| `uint8`  |                        255 |  10 hex chars |   18 hex chars |
-| `uint16` |                     65,535 |  12 hex chars |   22 hex chars |
-| `uint24` |                 16,777,215 |  14 hex chars |   26 hex chars |
-| `uint32` |              4,294,967,295 |  16 hex chars |   28 hex chars |
-| `uint48` |        281,474,976,710,655 |  20 hex chars |   30 hex chars |
-| `uint64` | 18,446,744,073,709,551,615 |  24 hex chars |   32 hex chars |
-
-Use a larger profile when the table or allocation strategy needs it:
+Use labels when the public ID should carry a table/type/bucket:
 
 ```python
-id_to_hex(123, profile="uint48")
-id_to_hex(123, profile="uint64")
+from sql_id_library import (
+    configure_sql_id_labels,
+    hex_to_id_label,
+    id_to_hex_label,
+)
+
+configure_sql_id_labels({
+    "users": 1,
+    "plans": 2,
+    "repair": 3,
+})
+
+public_hex = id_to_hex_label(123, "users")
+user_id = hex_to_id_label(public_hex, "users")
 ```
 
-Use boosted mode when the public endpoint is highly exposed, hard to rate-limit, or simply deserves stronger rejection of random garbage:
+You can configure all labels at once in code:
 
 ```python
-id_to_hex(123, profile="uint32", boosted=True)
+configure_sql_id_labels({
+    "dry_run": 1,
+    "plan": 2,
+    "execute": 3,
+    "enquire": 4,
+    "repair": 5,
+})
 ```
+
+Or load labels from a file:
+
+```python
+from sql_id_library import load_sql_id_labels_from_file
+
+load_sql_id_labels_from_file("./test_sql_id_labels.json")
+load_sql_id_labels_from_file("./test_sql_id_labels.yaml")
+```
+
+JSON support uses the Python standard library. YAML support is optional and
+requires PyYAML; if it is unavailable, loading a YAML file raises `ValueError`.
+If same-stem files both exist, for example `test_sql_id_labels.json` and
+`test_sql_id_labels.yaml`, the loader reads both and refuses to continue unless
+they normalize to exactly the same label registry. Each label file must be
+`2000` bytes or smaller.
+
+Supported file shapes:
+
+```yaml
+1: dry_run
+2: plan
+3: execute
+4: enquire
+5: repair
+```
+
+```json
+{
+  "dry_run": 1,
+  "plan": 2,
+  "execute": 3,
+  "enquire": 4,
+  "repair": 5
+}
+```
+
+Strict behavior:
+
+```python
+plain = id_to_hex(123)
+user = id_to_hex_label(123, "users")
+
+hex_to_id(plain)                  # 123
+hex_to_id(user)                   # None
+
+hex_to_id_label(user, "users")    # 123
+hex_to_id_label(user, "repair")   # None
+hex_to_id_label(plain, "users")   # None
+```
+
+You may also pass numeric label IDs directly:
+
+```python
+id_to_hex_label(123, 1)
+hex_to_id_label(public_hex, 1)
+```
+
+Allowed labeled IDs are `1..30`. Label `0` is reserved for the unlabeled API.
+Label `31` is reserved for future escape behavior.
 
 ---
 
-## What is inside the handle?
+## Validation
 
-A public handle contains three things:
-
-```text
-scheme version + encoded SQL ID + keyed validation tag
-```
-
-The version lets the format evolve.
-
-The encoded ID lets your application recover the SQL integer.
-
-The keyed tag lets the decoder reject tampered, random, malformed, or wrong-secret handles.
-
-The caller does not need to know any of this.
-
-The caller just sees hex.
-
----
-
-## Versioning
-
-Every generated handle carries a 4-bit scheme version.
-
-The current library issues version `1`.
-
-The version is checked during decode. If the handle belongs to a version that is not active, validation fails cleanly.
-
-```text
-unsupported_version
-```
-
-This matters because public IDs live for a long time.
-
-They appear in logs, emails, exports, audit trails, integrations, bookmarks, and customer systems. A public ID format should not paint the system into a corner.
-
-Versioning gives the scheme room to change deliberately later.
-
-A future version could change the internal mixing, validation tag, layout policy, or key schedule without making old and new handles ambiguous.
-
-Decode remains simple:
-
-```text
-read hex length
-select exact layout
-decrypt payload
-check version
-check ID range
-check keyed tag
-return SQL ID
-```
-
-There is no “try every format”.
-
-There is no guessing.
-
-The handle length identifies the profile and mode.
-The embedded version identifies the scheme.
-
----
-
-## Decode is length-driven
-
-There is no separate boosted flag inside the public API.
-
-A handle’s length selects the layout.
-
-For example:
-
-```text
-16 hex chars  -> uint32 normal
-28 hex chars  -> uint32 boosted
-24 hex chars  -> uint64 normal
-32 hex chars  -> uint64 boosted
-```
-
-That keeps the public format compact and unambiguous.
-
----
-
-# Validation
-
-For normal application flow, use:
+For normal application flow, use the strict integer-returning APIs:
 
 ```python
 id_value = hex_to_id(public_hex)
+user_id = hex_to_id_label(public_hex, "users")
 ```
 
-It returns the SQL ID or `None`.
-
-For diagnostics, use:
+For diagnostics:
 
 ```python
-result = validate_hex(public_hex)
+result = validate_hex(public_hex)          # expects label 0
+result = validate_hex_label(public_hex, "users")
+result = inspect_hex(public_hex)           # accepts any non-reserved label
 ```
 
-The result includes:
+`inspect_hex()` and `hex_to_parts()` are inspection helpers. Do not use them as
+typed route enforcement. Enforcement should always name the expected label.
+
+Validation result fields include:
 
 ```text
 ok
 id
-profile
-mode
+public_hex
+label_id
+label
 version
 error_code
 error
@@ -274,27 +201,25 @@ error
 
 Typical errors include:
 
-| Code                  | Meaning                            |
-| --------------------- | ---------------------------------- |
-| `not_string`          | Input was not a string             |
-| `invalid_hex`         | Input contained non-hex characters |
-| `unsupported_length`  | No layout exists for this length   |
-| `bad_config`          | Secret is missing or too weak      |
-| `unsupported_version` | Decoded version is not active      |
-| `id_out_of_range`     | Decoded ID is outside the profile  |
-| `tag_mismatch`        | Keyed validation tag did not match |
-
-The convenience API is quiet.
-
-The validation API explains.
+| Code                  | Meaning                                 |
+| --------------------- | --------------------------------------- |
+| `not_string`          | Input was not a string                  |
+| `invalid_hex`         | Input contained non-hex characters      |
+| `unsupported_length`  | Public ID was not exactly 16 hex chars  |
+| `bad_config`          | Secret is missing or too weak           |
+| `tag_mismatch`        | Keyed validation tag did not match      |
+| `unsupported_version` | Decoded version is not active           |
+| `reserved_label`      | Decoded label is reserved               |
+| `label_mismatch`      | Decoded label was not the expected one  |
+| `id_out_of_range`     | Decoded ID is outside the public range  |
 
 ---
 
-# Configuration
+## Configuration
 
 Set `XCTX_ID_PASSWORD` to a strong secret.
 
-Use at least 32 UTF-8 bytes.
+Use at least 32 UTF-8 bytes:
 
 ```bash
 export XCTX_ID_PASSWORD="$(python -c 'import secrets; print(secrets.token_hex(32))')"
@@ -310,63 +235,46 @@ Rotate it deliberately.
 
 ---
 
-# Security shape
+## Security Shape
 
-For one fixed profile, mode, version, and secret, every accepted SQL ID has exactly one public handle.
-
-A random correct-length hex string is overwhelmingly unlikely to decode.
-
-Normal mode uses:
+For one fixed expected label, including `label=0`, a random 16-character hex
+string is accepted with probability:
 
 ```text
-4 version bits + 28 keyed tag bits
+(2^32 - 1) / 2^64
 ```
 
-So random input is accepted with probability just under:
+That is just under:
 
 ```text
 1 in 2^32
 ```
 
-Boosted mode uses at least:
+The strict APIs enforce one expected label:
 
-```text
-4 version bits + 60 keyed tag bits
+```python
+hex_to_id(public_hex)                 # expected label 0
+hex_to_id_label(public_hex, "users")  # expected label users
 ```
 
-So random input is accepted with probability at most just under:
+Generic inspection accepts labels `0..30`, so it has a wider acceptance surface.
+Use it for diagnostics, not authorization-sensitive routing.
 
-```text
-1 in 2^64
-```
+The public ID is not a permission token.
 
-Some boosted profiles are stronger.
+It is not a session token.
 
-That is before checking whether the decoded SQL ID actually exists.
+It is not a bearer credential.
 
-And before authorization.
-
-For example, with the default `uint32` normal profile, a random 16-character hex string is accepted at roughly 1 in 4.29 billion.
-
-If your table only has 1 million rows, the chance of hitting a live row is far lower again.
-
-And even then, the caller still has to pass your permission checks.
+It is a public reference to a row. Decode it, load the row, and perform normal
+authorization and business-rule checks.
 
 ---
 
-## Bad IDs should count
+## Bad IDs Should Count
 
-A bad public ID might be a typo.
-
-It might be a stale link.
-
-It might be a broken client.
-
-It might be a bot.
-
-It might be someone guessing.
-
-Your application should treat repeated bad IDs as a signal.
+A bad public ID might be a typo, stale link, broken client, bot, or guessing.
+Treat repeated bad IDs as suspicious.
 
 Count them by whatever makes sense for your system:
 
@@ -381,9 +289,7 @@ device
 time bucket
 ```
 
-A simple rate limit changes the economics completely.
-
-For example:
+A simple rate limit changes the economics completely:
 
 ```text
 10 bad IDs per 30 minutes per bucket
@@ -395,148 +301,40 @@ is:
 175,200 guesses per year per bucket
 ```
 
-At that rate, the expected time to hit any decoder-valid normal-mode handle is roughly:
+At that rate, the expected time to hit any strict expected-label decoder-valid
+handle is roughly:
 
 ```text
 24,515 years per bucket
 ```
 
-For the weakest boosted mode, it is roughly:
+That still only means decoder-valid.
 
-```text
-105 trillion years per bucket
-```
+It does not mean real row.
 
-That still only means “decoder-valid”.
+It does not mean authorized.
 
-It does not mean “real row”.
-
-It does not mean “authorized”.
-
-It does not mean “access granted”.
+It does not mean access granted.
 
 ---
 
-# Capacity
+## Developer Demo
 
-The default `uint32` profile supports over 4.29 billion SQL IDs.
+```bash
+./sql_id_demo_for_dev.py
+./sql_id_demo_for_dev.py --int_id 1
+./sql_id_demo_for_dev.py --int_id 1 --label users
+./sql_id_demo_for_dev.py --labels-file ./test_sql_id_labels.yaml --int_id 1 --label repair
+./sql_id_demo_for_dev.py --hex_id "<public_hex>"
+./sql_id_demo_for_dev.py --hex_id "<public_hex>" --label users
+```
 
-For many applications, that is plenty.
-
-For very large systems, use `uint48` or `uint64`.
-
-Suppose you have:
+The demo configures local sample labels:
 
 ```text
-100 servers
-100 million IDs per server per day
+users=1
+plans=2
+repair=3
 ```
 
-That is:
-
-```text
-10 billion IDs per day
-```
-
-At that rate:
-
-| Profile  |  Approximate lifetime |
-| -------- | --------------------: |
-| `uint32` |        about 10 hours |
-| `uint48` |        about 77 years |
-| `uint64` | about 5 million years |
-
-If you partition the ID space by server, region, tenant, or shard, plan the bits deliberately.
-
-The library gives you the public handle layer.
-
-Your SQL ID allocation strategy remains your architecture.
-
----
-
-# SQL-style aliases
-
-The core API is:
-
-```python
-id_to_hex(123)
-hex_to_id(public_hex)
-validate_hex(public_hex)
-```
-
-SQL-style aliases are also included:
-
-```python
-sql_generate_id(123)
-sql_decode_id(public_hex)
-sql_validate_id(public_hex)
-```
-
-Use whichever reads better in your codebase.
-
----
-
-# What this library is
-
-It is a small SQL boundary tool.
-
-It lets the database keep the thing it is good at:
-
-```text
-integer primary keys
-```
-
-And lets the outside world use the thing it wants:
-
-```text
-compact public hex handles
-```
-
-It avoids UUID primary keys when you do not need them.
-
-It avoids lookup tables when deterministic conversion is enough.
-
-It avoids exposing raw sequential IDs.
-
-It keeps public IDs versioned, keyed, compact, and reversible by your application.
-
----
-
-# What this library is not
-
-It is not an authorization system.
-
-It is not a bearer token.
-
-It is not a password reset token.
-
-It is not a capability URL.
-
-It is not a reason to skip permission checks.
-
-Decode the handle.
-
-Load the row.
-
-Check access.
-
-Then proceed.
-
----
-
-# The point
-
-Use SQL integers where SQL integers shine.
-
-Use public hex where public hex shines.
-
-Do not force one identifier to satisfy two very different jobs.
-
-```python
-public_id = id_to_hex(row.id)
-row_id = hex_to_id(public_id)
-```
-
-Fast inside.
-Clean outside.
-Designed for the boundary between them.
+Applications should configure their own label registry at startup.

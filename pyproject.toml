@@ -3,9 +3,9 @@ requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "sql-id-layout-registry"
+name = "sql-id-library"
 version = "0.1.0"
-description = "Layout-registry driven SQL integer public ID encoder/decoder"
+description = "Typed 16-character public ID encoder/decoder for SQL integer keys"
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [{name = "XCTX"}]
