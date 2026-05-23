@@ -404,6 +404,21 @@ _LABELS_BY_NAME: Mapping[str, int] = MappingProxyType({})
 _LABEL_NAMES_BY_ID: Mapping[int, str] = MappingProxyType({})
 _CONFIG_FILE_CACHE: dict[Path, Mapping[str, object]] = {}
 _VERSION_STATE_CACHE: _VersionState | _ConfigError | None = None
+_SERVER_MISCONFIGURED_ERROR_CODES: Final[frozenset[str]] = frozenset(
+    {
+        "bad_config",
+        "missing_pepper_file",
+        "unreadable_pepper_file",
+        "bad_pepper_file",
+        "bad_pepper_permissions",
+        "pepper_too_short",
+        "pepper_too_long",
+        "invalid_pepper_hex",
+        "low_diversity_pepper",
+        "low_bit_balance_pepper",
+        "internal_error",
+    }
+)
 
 __all__ = [
     "ACTIVE_DECODE_VERSIONS",
@@ -487,6 +502,8 @@ __all__ = [
     "is_configured",
     "layout_for_hex_length",
     "load_sql_id_config_from_file",
+    "public_error",
+    "public_error_code",
     "reload_sql_id_pepper",
     "reload_sql_id_versions",
     "reload_sql_id_config_from_file",
@@ -1879,6 +1896,25 @@ def validate_hex_label(value: object, label: object) -> SqlIdValidation:
 def inspect_hex(value: object) -> SqlIdValidation:
     """Inspect any valid non-reserved label. Do not use as route enforcement."""
     return _decode_public_hex(value, expected_label=None)
+
+
+def public_error_code(result: SqlIdValidation) -> str:
+    """Return a safe coarse error code for untrusted API boundaries."""
+    if result.ok:
+        return ""
+    if result.error_code in _SERVER_MISCONFIGURED_ERROR_CODES:
+        return "server_misconfigured"
+    return "invalid_public_id"
+
+
+def public_error(result: SqlIdValidation) -> str:
+    """Return a safe coarse error message for untrusted API boundaries."""
+    code = public_error_code(result)
+    if code == "":
+        return ""
+    if code == "server_misconfigured":
+        return "server misconfigured"
+    return "invalid public id"
 
 
 def sql_validate_id(value: object) -> SqlIdValidation:

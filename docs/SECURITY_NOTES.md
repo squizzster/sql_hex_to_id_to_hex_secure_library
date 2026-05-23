@@ -343,6 +343,8 @@ For bearer-token uses, generate independent random tokens of at least 128 bits.
 - `validate_hex_label()` validates only one expected label.
 - `inspect_hex()` returns diagnostic metadata for any non-reserved label.
 - `hex_to_parts()` returns `(label_id, label_name, range_class, tag_bits, version, integer_id)` for diagnostics.
+- `SqlIdValidation.error`, `SqlIdValidation.error_code`, `inspect_hex()`, and `hex_to_parts()` are internal diagnostics, not public API response bodies.
+- `public_error()` and `public_error_code()` map diagnostics to coarse untrusted-boundary values.
 - `configure_sql_id()` validates the pepper path, allowed version list, and/or full local label registry before atomically replacing configured values.
 - New IDs use the highest fully configured version among `1..6`.
 - Increasing the version should be rare and treated as a serious security-driven rotation decision.

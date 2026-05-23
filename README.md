@@ -134,6 +134,8 @@ from sql_id_library import (
     configure_sql_id,
     hex_to_id_label,
     id_to_hex_label,
+    public_error,
+    public_error_code,
 )
 
 configure_sql_id({
@@ -308,8 +310,25 @@ result = validate_hex_label(public_hex, "users")
 result = inspect_hex(public_hex)           # accepts any non-reserved label
 ```
 
-`inspect_hex()` and `hex_to_parts()` are inspection helpers. Do not use them as
-typed route enforcement. Enforcement should always name the expected label.
+`SqlIdValidation.error`, `SqlIdValidation.error_code`, `inspect_hex()`, and
+`hex_to_parts()` are internal diagnostics. Do not serialize them directly to
+untrusted callers. A successful `inspect_hex()` result exposes the decoded SQL
+ID, label, range class, tag bits, and version. Enforcement should always name
+the expected label.
+
+At an HTTP/API boundary, use the public-safe helpers:
+
+```python
+result = validate_hex_label(public_hex, "users")
+if not result.ok:
+    return {"code": public_error_code(result), "error": public_error(result)}
+```
+
+`public_error(result)` returns `""`, `"invalid public id"`, or
+`"server misconfigured"`. `public_error_code(result)` returns `""`,
+`"invalid_public_id"`, or `"server_misconfigured"`. Detailed config, pepper,
+filesystem, and semantic diagnostics remain available on `result.error_code`
+and `result.error` for internal logs.
 
 Validation result fields include:
 

@@ -1269,6 +1269,49 @@ class TestSqlIdLibrary(unittest.TestCase):
         self.assertIsNone(sid.hex_to_id(encoded))
         self.assertIsNone(sid.hex_to_id_label(encoded, sid.MAX_LABEL))
 
+    def test_public_error_helpers_coarsen_internal_diagnostics(self) -> None:
+        ok_result = sid.validate_hex(self.assert_public_hex(sid.id_to_hex(123)))
+        self.assertEqual(sid.public_error_code(ok_result), "")
+        self.assertEqual(sid.public_error(ok_result), "")
+
+        server_codes = {
+            "bad_config",
+            "missing_pepper_file",
+            "unreadable_pepper_file",
+            "bad_pepper_file",
+            "bad_pepper_permissions",
+            "pepper_too_short",
+            "pepper_too_long",
+            "invalid_pepper_hex",
+            "low_diversity_pepper",
+            "low_bit_balance_pepper",
+            "internal_error",
+        }
+        invalid_public_id_codes = {
+            "not_string",
+            "unsupported_length",
+            "invalid_hex",
+            "tag_mismatch",
+            "unsupported_version",
+            "reserved_label",
+            "label_mismatch",
+            "id_out_of_range",
+            "invalid_label",
+            "unknown_future_code",
+        }
+
+        for code in sorted(server_codes):
+            with self.subTest(code=code):
+                result = sid.SqlIdValidation(ok=False, error_code=code, error="detailed internal diagnostic")
+                self.assertEqual(sid.public_error_code(result), "server_misconfigured")
+                self.assertEqual(sid.public_error(result), "server misconfigured")
+
+        for code in sorted(invalid_public_id_codes):
+            with self.subTest(code=code):
+                result = sid.SqlIdValidation(ok=False, error_code=code, error="detailed internal diagnostic")
+                self.assertEqual(sid.public_error_code(result), "invalid_public_id")
+                self.assertEqual(sid.public_error(result), "invalid public id")
+
     def test_valid_tag_for_noncanonical_range_ids_is_rejected(self) -> None:
         round_keys, tag_key = sid._key_material()
         cases = [
