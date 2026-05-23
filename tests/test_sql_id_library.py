@@ -577,6 +577,21 @@ class TestSqlIdLibrary(unittest.TestCase):
         finally:
             bad_json_path.unlink(missing_ok=True)
 
+    def test_load_sql_id_config_from_file_rejects_symlink_loop_as_value_error(self) -> None:
+        if os.name != "posix" or not hasattr(os, "symlink"):
+            self.skipTest("POSIX symlink behavior only")
+
+        sid.configure_sql_id({"labels": {"users": 1}})
+        loop_path = self.test_dir / "loop_sql_id_labels.json"
+        loop_path.unlink(missing_ok=True)
+        loop_path.symlink_to(loop_path)
+        try:
+            with self.assertRaises(ValueError):
+                sid.load_sql_id_config_from_file(loop_path)
+            self.assertEqual(sid.available_labels(), {"users": 1})
+        finally:
+            loop_path.unlink(missing_ok=True)
+
     def test_load_sql_id_config_from_json_rejects_duplicate_keys_and_names(self) -> None:
         duplicate_key_path = self.test_dir / "duplicate_key_sql_id_labels.json"
         duplicate_name_path = self.test_dir / "duplicate_name_sql_id_labels.json"
@@ -781,6 +796,9 @@ class TestSqlIdLibrary(unittest.TestCase):
             ("long_sql_id_pepper.key", "01" * (sid.MAX_PEPPER_BYTES + 1), 0o400, "pepper_too_long"),
             ("odd_sql_id_pepper.key", ("01" * 32) + "0", 0o400, "invalid_pepper_hex"),
             ("nonhex_sql_id_pepper.key", "g" * 64, 0o400, "invalid_pepper_hex"),
+            ("leading_space_sql_id_pepper.key", " " + TEST_PEPPER_HEX, 0o400, "invalid_pepper_hex"),
+            ("trailing_space_sql_id_pepper.key", TEST_PEPPER_HEX + " ", 0o400, "invalid_pepper_hex"),
+            ("trailing_tab_sql_id_pepper.key", TEST_PEPPER_HEX + "\t", 0o400, "invalid_pepper_hex"),
             ("low_diversity_sql_id_pepper.key", "00" * 32, 0o400, "low_diversity_pepper"),
             ("world_readable_sql_id_pepper.key", TEST_PEPPER_HEX, 0o644, "bad_pepper_permissions"),
         ]
@@ -838,6 +856,22 @@ class TestSqlIdLibrary(unittest.TestCase):
             symlink_path.unlink(missing_ok=True)
             target_path.chmod(0o600) if target_path.exists() else None
             target_path.unlink(missing_ok=True)
+            sid.configure_sql_id({"pepper_file_location": str(self.test_pepper_path)})
+
+    def test_pepper_file_symlink_loop_is_rejected_with_specific_error(self) -> None:
+        if os.name != "posix" or not hasattr(os, "symlink"):
+            self.skipTest("POSIX symlink behavior only")
+
+        loop_path = self.test_dir / "loop_sql_id_pepper.key"
+        loop_path.unlink(missing_ok=True)
+        loop_path.symlink_to(loop_path)
+        try:
+            sid.configure_sql_id({"pepper_file_location": str(loop_path)})
+            self.assertFalse(sid.is_configured())
+            self.assertIsNone(sid.id_to_hex(1))
+            self.assertEqual(sid.validate_hex("0" * sid.HEX_CHARS).error_code, "bad_pepper_file")
+        finally:
+            loop_path.unlink(missing_ok=True)
             sid.configure_sql_id({"pepper_file_location": str(self.test_pepper_path)})
 
     def test_encoding_is_deterministic_for_same_password_id_and_label(self) -> None:

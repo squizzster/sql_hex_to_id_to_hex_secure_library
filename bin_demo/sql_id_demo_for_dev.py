@@ -317,7 +317,7 @@ def print_config_note() -> None:
         print("Real applications should set a stable hex secret in the process environment.")
     if USING_DEMO_HARD_CODED_PEPPER:
         print(f"Using demo pepper file: {configured_pepper_file_location()}")
-        print("Real applications should use a stable owner-readable pepper file.")
+        print("Real applications should use a stable private readable pepper file.")
     print()
 
 

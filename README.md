@@ -34,11 +34,13 @@ For deployed public IDs, use three independent inputs:
 - a disk pepper file, defaulting to `~/.sql_hex_id_pepper_file.key`
 
 Generate each one independently. `SQL_ID_LIBRARY_DOMAIN_SALT_HEX`,
-`SQL_ID_LIBRARY_PASSWORD_HEX`, and the pepper must each be `64..512` hex characters. The
-library decodes each value to `32..256` bytes, rejects low byte diversity and
-extreme bit imbalance, then normalizes the accepted bytes to a role-separated
-SHA-512 digest before key derivation. This normalization gives every allowed
-input length the same internal size; it does not add entropy to weak input.
+`SQL_ID_LIBRARY_PASSWORD_HEX`, and the pepper must each provide `64..512` hex
+characters. The pepper file may include one final line ending from shell
+redirection; other leading or trailing whitespace is rejected. The library
+decodes each value to `32..256` bytes, rejects low byte diversity and extreme
+bit imbalance, then normalizes the accepted bytes to a role-separated SHA-512
+digest before key derivation. This normalization gives every allowed input
+length the same internal size; it does not add entropy to weak input.
 
 ```bash
 export SQL_ID_LIBRARY_DOMAIN_SALT_HEX="$(python -c 'import secrets; print(secrets.token_hex(32))')"
@@ -344,15 +346,23 @@ export SQL_ID_LIBRARY_DOMAIN_SALT_HEX="$(python -c 'import secrets; print(secret
 export SQL_ID_LIBRARY_PASSWORD_HEX="$(python -c 'import secrets; print(secrets.token_hex(32))')"
 ```
 
-Use `64..512` hex characters for the pepper. The raw pepper file is capped at
-512 bytes, so a max-length pepper must not include a trailing newline. The same
-hex, byte-diversity, bit-balance, and SHA-512 normalization rules apply to
-`SQL_ID_LIBRARY_DOMAIN_SALT_HEX`, `SQL_ID_LIBRARY_PASSWORD_HEX`, and the pepper:
+Use `64..512` hex characters for the pepper. One final line ending from shell
+redirection is accepted; other leading or trailing whitespace is rejected. The
+raw pepper file is capped at 512 bytes, so a max-length pepper must not include
+a trailing newline. The same hex, byte-diversity, bit-balance, and SHA-512
+normalization rules apply to `SQL_ID_LIBRARY_DOMAIN_SALT_HEX`,
+`SQL_ID_LIBRARY_PASSWORD_HEX`, and the pepper:
 
 ```bash
 python -c "import secrets; print(secrets.token_hex(32))" > ~/.sql_hex_id_pepper_file.key
 chmod 0400 ~/.sql_hex_id_pepper_file.key
 ```
+
+On POSIX systems the library rejects symlink pepper paths and unsafe mode bits.
+It does not enforce a particular owner, group, parent-directory owner, or
+deployment filesystem policy. Apply those controls in the application or
+platform layer that knows the runtime user, container model, secret manager, and
+host filesystem.
 
 Keep it private.
 Keep it stable.

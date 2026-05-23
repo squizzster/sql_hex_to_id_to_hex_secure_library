@@ -61,7 +61,9 @@ Secret configuration:
     create the pepper file configured by ``pepper_file_location``. Each of those
     three key inputs uses the same 64..512 hex-character contract. The decoded
     bytes are checked for minimum byte diversity and extreme bit imbalance, then
-    normalized to a role-separated SHA-512 digest before key derivation.
+    normalized to a role-separated SHA-512 digest before key derivation. The
+    pepper file accepts one final line ending from shell redirection but rejects
+    other leading or trailing whitespace.
 
     Generate each value independently:
 
@@ -830,7 +832,11 @@ def _candidate_config_paths(path: Path) -> tuple[Path, ...]:
     candidates = []
     for candidate_suffix in (".json", ".yaml", ".yml"):
         candidate = path.with_suffix(candidate_suffix)
-        if candidate.exists():
+        try:
+            exists = candidate.exists()
+        except (OSError, RuntimeError) as exc:
+            raise ValueError(f"could not inspect config file path: {exc}") from exc
+        if exists:
             candidates.append(candidate)
     if path not in candidates:
         candidates.append(path)
@@ -842,7 +848,10 @@ def _config_file_cache_key(path: Path) -> Path:
     path = path.expanduser()
     if path.suffix.lower() not in {".json", ".yaml", ".yml"}:
         raise ValueError("config file must use .json, .yaml, or .yml")
-    return path.resolve().with_suffix("")
+    try:
+        return path.resolve().with_suffix("")
+    except (OSError, RuntimeError) as exc:
+        raise ValueError(f"could not resolve config file path: {exc}") from exc
 
 
 def _load_one_config_file(path: Path) -> dict[str, object]:
@@ -1149,9 +1158,13 @@ def _read_pepper_bytes_from_path(path: Path) -> bytes:
     if len(raw_data) > _MAX_PEPPER_FILE_BYTES:
         raise _ConfigError("pepper_too_long", f"pepper file must be at most {_MAX_PEPPER_FILE_BYTES} bytes")
     try:
-        text = raw_data.decode("ascii").strip()
+        text = raw_data.decode("ascii")
     except UnicodeDecodeError as exc:
         raise _ConfigError("invalid_pepper_hex", f"pepper file must contain ASCII hex: {exc}") from exc
+    if text.endswith("\r\n"):
+        text = text[:-2]
+    elif text.endswith("\n"):
+        text = text[:-1]
 
     if len(text) < MIN_PEPPER_HEX_CHARS:
         raise _ConfigError("pepper_too_short", f"pepper hex must be at least {MIN_PEPPER_HEX_CHARS} characters")
@@ -1177,7 +1190,7 @@ def _pepper_bytes() -> bytes:
 
     with _CONFIG_LOCK:
         path = _configured_pepper_path()
-        cache_key = path.resolve()
+        cache_key = Path(os.path.abspath(path))
         if _PEPPER_CACHE is not None and _PEPPER_CACHE[0] == cache_key:
             return _PEPPER_CACHE[1]
 
@@ -1192,7 +1205,7 @@ def reload_sql_id_pepper() -> None:
 
     with _CONFIG_LOCK:
         path = _configured_pepper_path()
-        cache_key = path.resolve()
+        cache_key = Path(os.path.abspath(path))
         pepper = _read_pepper_bytes_from_path(path)
         _PEPPER_CACHE = (cache_key, pepper)
         _derive_material.cache_clear()

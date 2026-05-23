@@ -56,10 +56,12 @@ The default pepper path is:
 ~/.sql_hex_id_pepper_file.key
 ```
 
-Create it with `64..512` hex characters. The raw pepper file is capped at 512
-bytes, so a max-length pepper must not include a trailing newline. The decoded
-pepper bytes use the same byte-diversity, bit-balance, and SHA-512
-normalization rules as the salt and runtime secret. The minimum generator is:
+Create it with `64..512` hex characters. One final line ending from shell
+redirection is accepted; other leading or trailing whitespace is rejected. The
+raw pepper file is capped at 512 bytes, so a max-length pepper must not include
+a trailing newline. The decoded pepper bytes use the same byte-diversity,
+bit-balance, and SHA-512 normalization rules as the salt and runtime secret.
+The minimum generator is:
 
 ```bash
 python -c "import secrets; print(secrets.token_hex(32))" > ~/.sql_hex_id_pepper_file.key
@@ -69,6 +71,10 @@ chmod 0400 ~/.sql_hex_id_pepper_file.key
 The application process must be able to read this file. On POSIX systems the
 library rejects pepper files that allow execution, group write, or any
 other-user access. `0400`, `0600`, `0440`, and `0640` are acceptable patterns.
+The library intentionally does not enforce a specific owner, group, parent
+directory owner, or broader filesystem policy. Those are deployment decisions:
+set them in your application, container, service manager, or secrets-management
+layer according to the user and environment that actually run the process.
 
 Changing `SQL_ID_LIBRARY_DOMAIN_SALT_HEX`, `SQL_ID_LIBRARY_PASSWORD_HEX`, or the
 pepper after public IDs have been issued makes those existing public IDs stop

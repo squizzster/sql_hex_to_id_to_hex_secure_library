@@ -105,10 +105,11 @@ decoded `32..256` secret bytes before key derivation:
 python -c "import secrets; print(secrets.token_hex(32))"
 ```
 
-The pepper file must contain `64..512` hex characters. The library validates and
-normalizes the decoded `32..256` pepper bytes before key derivation. The raw
-pepper file is capped at 512 bytes, so a max-length pepper must not include a
-trailing newline. The default path is:
+The pepper file must contain `64..512` hex characters. One final line ending
+from shell redirection is accepted; other leading or trailing whitespace is
+rejected. The library validates and normalizes the decoded `32..256` pepper
+bytes before key derivation. The raw pepper file is capped at 512 bytes, so a
+max-length pepper must not include a trailing newline. The default path is:
 
 ```text
 ~/.sql_hex_id_pepper_file.key
@@ -126,6 +127,12 @@ then validates and reads through that same file descriptor. It rejects pepper
 files that allow execution, group write, or any other-user access. The
 application process must still be able to read the file.
 
+The library intentionally does not require one owner, group, parent-directory
+owner, or host filesystem policy. Those checks depend on the deployment: local
+service users, containers, bind mounts, secret stores, shared groups, and
+orchestrators all have different correct answers. Enforce those rules in the
+application or platform layer that owns the runtime environment.
+
 Changing `SQL_ID_LIBRARY_DOMAIN_SALT_HEX`, `SQL_ID_LIBRARY_PASSWORD_HEX`, or the
 pepper after public IDs have been issued makes those existing public IDs stop
 decoding.
@@ -137,6 +144,10 @@ All three key inputs use the same source contract:
 ```text
 64..512 hex characters -> 32..256 decoded bytes
 ```
+
+For the pepper file, one final line ending from shell redirection is accepted
+before this contract is applied. Other leading or trailing whitespace is
+rejected.
 
 The decoded bytes are validated before any hashing. They must have at least
 eight unique byte values and must not have an implausibly extreme bit balance.
