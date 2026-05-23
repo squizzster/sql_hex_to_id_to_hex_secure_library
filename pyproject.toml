@@ -18,6 +18,12 @@ classifiers = [
 
 [project.optional-dependencies]
 yaml = ["PyYAML>=6.0"]
+test = ["pytest>=8.0"]
 
 [tool.setuptools]
 py-modules = ["sql_id_library"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-ra"

@@ -106,8 +106,10 @@ load_sql_id_config_from_file("./conf/test_sql_id_config.yaml")
 Run the regression tests:
 
 ```bash
-python run_tests_for_sql_id.py
+python -m pytest
 ```
+
+`python run_tests_for_sql_id.py` remains as a compatibility wrapper.
 
 Run the developer demo:
 
