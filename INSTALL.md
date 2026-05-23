@@ -18,7 +18,8 @@ pip install ".[yaml]"
 
 For deployed public IDs, replace `DOMAIN_SALT_HEX` near the top of
 `sql_id_library.py` with a deployment-specific random hex value. It must contain
-`64..512` hex characters and is decoded to `32..256` bytes:
+`64..512` hex characters. The decoded `32..256` bytes are sanity-checked and
+then normalized to a role-separated SHA-512 digest before key derivation:
 
 ```bash
 python -c "import secrets; print(secrets.token_hex(32))"
@@ -38,8 +39,9 @@ independently.
 ## 2. Set The Runtime Secret
 
 Set `XCTX_ID_PASSWORD` to a separate strong hex secret. It must contain
-`64..512` hex characters and is decoded to `32..256` secret bytes before key
-derivation:
+`64..512` hex characters. The decoded `32..256` secret bytes are checked with
+the same rules as the salt and pepper, then normalized to a role-separated
+SHA-512 digest before key derivation:
 
 ```bash
 export XCTX_ID_PASSWORD="$(python -c 'import secrets; print(secrets.token_hex(32))')"
@@ -57,8 +59,9 @@ The default pepper path is:
 ```
 
 Create it with `64..512` hex characters. The raw pepper file is capped at 512
-bytes, so a max-length pepper must not include a trailing newline. The minimum
-generator is:
+bytes, so a max-length pepper must not include a trailing newline. The decoded
+pepper bytes use the same byte-diversity, bit-balance, and SHA-512
+normalization rules as the salt and runtime secret. The minimum generator is:
 
 ```bash
 python -c "import secrets; print(secrets.token_hex(32))" > ~/.sql_hex_id_pepper_file.key

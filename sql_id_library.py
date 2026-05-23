@@ -60,8 +60,9 @@ Secret configuration:
     top of this file with a deployment-specific hex string, set
     XCTX_ID_PASSWORD to a separate hex secret, and create the pepper file
     configured by ``pepper_file_location``. Each of those three key inputs uses
-    the same 64..512 hex-character contract and is decoded to bytes before key
-    derivation.
+    the same 64..512 hex-character contract. The decoded bytes are checked for
+    minimum byte diversity and extreme bit imbalance, then normalized to a
+    role-separated SHA-512 digest before key derivation.
 
     Generate each value independently:
 
@@ -97,6 +98,7 @@ import hashlib
 import hmac
 import errno
 import json
+import math
 import os
 import re
 import stat
@@ -116,6 +118,12 @@ MAX_KEY_INPUT_HEX_CHARS: Final[int] = 512
 MIN_KEY_INPUT_BYTES: Final[int] = 32
 MAX_KEY_INPUT_BYTES: Final[int] = 256
 MIN_KEY_INPUT_UNIQUE_BYTES: Final[int] = 8
+KEY_INPUT_BIT_BALANCE_MIN_TAIL_PROBABILITY: Final[float] = 1e-12
+NORMALIZED_KEY_INPUT_BYTES: Final[int] = 64
+_KEY_INPUT_NORMALIZATION_DOMAIN: Final[bytes] = b"xctx-sql-id-v4-key-input:"
+_PASSWORD_KEY_INPUT_ROLE: Final[bytes] = b"password"
+_DOMAIN_SALT_KEY_INPUT_ROLE: Final[bytes] = b"domain-salt"
+_PEPPER_KEY_INPUT_ROLE: Final[bytes] = b"pepper"
 MIN_PASSWORD_HEX_CHARS: Final[int] = MIN_KEY_INPUT_HEX_CHARS
 MAX_PASSWORD_HEX_CHARS: Final[int] = MAX_KEY_INPUT_HEX_CHARS
 MIN_PASSWORD_BYTES: Final[int] = MIN_KEY_INPUT_BYTES
@@ -406,6 +414,7 @@ __all__ = [
     "BIGINT_RANGE_MIN_ID",
     "BIGINT_TAG_BITS",
     "ISSUE_VERSION",
+    "KEY_INPUT_BIT_BALANCE_MIN_TAIL_PROBABILITY",
     "LABEL_BITS",
     "LABELS_CONFIG_KEY",
     "LAYOUT",
@@ -435,6 +444,7 @@ __all__ = [
     "MIN_TAG_BITS",
     "MYSQL_UNSIGNED_BIGINT_MAX",
     "NO_LABEL",
+    "NORMALIZED_KEY_INPUT_BYTES",
     "PEPPER_FILE_LOCATION_KEY",
     "RANGE_BITS",
     "RESERVED_LABEL",
@@ -556,6 +566,12 @@ def _registry_is_sane() -> bool:
         return False
     if MIN_KEY_INPUT_UNIQUE_BYTES != 8:
         return False
+    if KEY_INPUT_BIT_BALANCE_MIN_TAIL_PROBABILITY != 1e-12:
+        return False
+    if NORMALIZED_KEY_INPUT_BYTES != hashlib.sha512().digest_size:
+        return False
+    if NORMALIZED_KEY_INPUT_BYTES != 64:
+        return False
     if MIN_DOMAIN_SALT_HEX_CHARS != MIN_KEY_INPUT_HEX_CHARS:
         return False
     if MAX_DOMAIN_SALT_HEX_CHARS != MAX_KEY_INPUT_HEX_CHARS:
@@ -577,6 +593,10 @@ def _registry_is_sane() -> bool:
     if MIN_PEPPER_UNIQUE_BYTES != MIN_KEY_INPUT_UNIQUE_BYTES:
         return False
     if _MAX_PEPPER_FILE_BYTES != MAX_KEY_INPUT_HEX_CHARS:
+        return False
+    if _binomial_two_sided_tail_probability(256, 71) > KEY_INPUT_BIT_BALANCE_MIN_TAIL_PROBABILITY:
+        return False
+    if _binomial_two_sided_tail_probability(256, 72) <= KEY_INPUT_BIT_BALANCE_MIN_TAIL_PROBABILITY:
         return False
     if DEFAULT_PEPPER_FILE_LOCATION != "~/.sql_hex_id_pepper_file.key":
         return False
@@ -988,12 +1008,72 @@ def _decode_config_hex(
         raise _ConfigError("bad_config", f"{name} must decode to {min_bytes}..{max_bytes} bytes")
     if len(set(decoded)) < min_unique_bytes:
         raise _ConfigError("bad_config", f"{name} has too little byte diversity")
+    _validate_key_input_bit_balance(name, decoded, "bad_config")
     return decoded
 
 
+@lru_cache(maxsize=512)
+def _binomial_two_sided_tail_probability(n_bits: int, low_ones: int) -> float:
+    """Return P(bitcount <= low_ones or >= n_bits - low_ones) for fair bits."""
+    if n_bits <= 0:
+        raise ValueError("n_bits must be positive")
+    if low_ones < 0 or low_ones > n_bits // 2:
+        raise ValueError("low_ones must be in the lower half of the distribution")
+    if low_ones == n_bits // 2:
+        return 1.0
+
+    log_probability_terms = [
+        math.lgamma(n_bits + 1)
+        - math.lgamma(i + 1)
+        - math.lgamma(n_bits - i + 1)
+        - (n_bits * math.log(2.0))
+        for i in range(low_ones + 1)
+    ]
+    max_log_probability = max(log_probability_terms)
+    if max_log_probability < -745.0:
+        return 0.0
+
+    one_tail_probability = math.exp(max_log_probability) * sum(
+        math.exp(term - max_log_probability) for term in log_probability_terms
+    )
+    return min(1.0, 2.0 * one_tail_probability)
+
+
+def _key_input_bit_balance_tail_probability(decoded: bytes) -> tuple[float, int, int]:
+    """Return the two-sided fair-bit tail probability for decoded key input."""
+    n_bits = len(decoded) * 8
+    ones = sum(byte.bit_count() for byte in decoded)
+    low_ones = min(ones, n_bits - ones)
+    return _binomial_two_sided_tail_probability(n_bits, low_ones), ones, n_bits
+
+
+def _validate_key_input_bit_balance(name: str, decoded: bytes, code: str) -> None:
+    """Reject decoded key inputs with implausibly extreme bit imbalance."""
+    tail_probability, ones, n_bits = _key_input_bit_balance_tail_probability(decoded)
+    if tail_probability <= KEY_INPUT_BIT_BALANCE_MIN_TAIL_PROBABILITY:
+        zeros = n_bits - ones
+        raise _ConfigError(
+            code,
+            f"{name} bit balance is too unlikely for CSPRNG output "
+            f"(ones={ones}, zeros={zeros}, tail_probability<={KEY_INPUT_BIT_BALANCE_MIN_TAIL_PROBABILITY:g})",
+        )
+
+
+def _normalize_key_input(role: bytes, decoded: bytes) -> bytes:
+    """Normalize accepted variable-length key input to a role-separated digest."""
+    return hashlib.sha512(
+        _KEY_INPUT_NORMALIZATION_DOMAIN
+        + role
+        + b":len:"
+        + len(decoded).to_bytes(2, "big")
+        + b":value:"
+        + decoded
+    ).digest()
+
+
 def _password_bytes() -> bytes:
-    """Return configured hex-decoded runtime secret bytes or raise a config error."""
-    return _decode_config_hex(
+    """Return normalized runtime secret bytes or raise a config error."""
+    password = _decode_config_hex(
         name=ENV_PASSWORD_NAME,
         value=os.environ.get(ENV_PASSWORD_NAME),
         min_hex_chars=MIN_PASSWORD_HEX_CHARS,
@@ -1002,10 +1082,11 @@ def _password_bytes() -> bytes:
         max_bytes=MAX_PASSWORD_BYTES,
         min_unique_bytes=MIN_PASSWORD_UNIQUE_BYTES,
     )
+    return _normalize_key_input(_PASSWORD_KEY_INPUT_ROLE, password)
 
 
 def _domain_salt_bytes() -> bytes:
-    """Return domain salt bytes, rejecting the bundled salt outside demo/test use."""
+    """Return normalized domain salt bytes, rejecting bundled demo salt in production."""
     domain_salt = _decode_config_hex(
         name="DOMAIN_SALT_HEX",
         value=DOMAIN_SALT_HEX,
@@ -1020,7 +1101,7 @@ def _domain_salt_bytes() -> bytes:
             "bad_config",
             f"replace DOMAIN_SALT_HEX or set {DEMO_ALLOW_BUNDLED_DOMAIN_SALT_ENV}=1 for demo/test use only",
         )
-    return domain_salt
+    return _normalize_key_input(_DOMAIN_SALT_KEY_INPUT_ROLE, domain_salt)
 
 
 def _configured_pepper_path() -> Path:
@@ -1074,7 +1155,7 @@ def _open_pepper_fd(path: Path) -> int:
 
 
 def _read_pepper_bytes_from_path(path: Path) -> bytes:
-    """Read and validate pepper bytes from one already-selected path."""
+    """Read, validate, and normalize pepper bytes from one selected path."""
     fd = _open_pepper_fd(path)
     try:
         try:
@@ -1116,11 +1197,12 @@ def _read_pepper_bytes_from_path(path: Path) -> bytes:
         raise _ConfigError("bad_pepper_file", f"pepper must decode to {MIN_PEPPER_BYTES}..{MAX_PEPPER_BYTES} bytes")
     if len(set(pepper)) < MIN_PEPPER_UNIQUE_BYTES:
         raise _ConfigError("low_diversity_pepper", "pepper has too little byte diversity")
-    return pepper
+    _validate_key_input_bit_balance("pepper", pepper, "low_bit_balance_pepper")
+    return _normalize_key_input(_PEPPER_KEY_INPUT_ROLE, pepper)
 
 
 def _pepper_bytes() -> bytes:
-    """Return cached pepper bytes for the configured disk file."""
+    """Return cached normalized pepper bytes for the configured disk file."""
     global _PEPPER_CACHE
 
     with _CONFIG_LOCK:
@@ -1153,7 +1235,7 @@ def _derive_material(
     domain_salt_bytes: bytes,
     layout: SqlIdLayout,
 ) -> tuple[tuple[bytes, ...], bytes]:
-    """Derive layout-specific Feistel round keys and validation-tag key."""
+    """Derive layout-specific Feistel round keys and tag key from normalized inputs."""
     root_key = hmac.new(
         password_bytes,
         (

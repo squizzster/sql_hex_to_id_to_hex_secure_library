@@ -34,8 +34,11 @@ For deployed public IDs, use three independent inputs:
 - a disk pepper file, defaulting to `~/.sql_hex_id_pepper_file.key`
 
 Generate each one independently. `DOMAIN_SALT_HEX`, `XCTX_ID_PASSWORD`, and the
-pepper must each be `64..512` hex characters; the library decodes those hex
-strings to `32..256` bytes before key derivation.
+pepper must each be `64..512` hex characters. The library decodes each value to
+`32..256` bytes, rejects low byte diversity and extreme bit imbalance, then
+normalizes the accepted bytes to a role-separated SHA-512 digest before key
+derivation. This normalization gives every allowed input length the same
+internal size; it does not add entropy to weak input.
 
 ```bash
 python -c "import secrets; print(secrets.token_hex(32))"
@@ -315,6 +318,7 @@ Typical errors include:
 | `pepper_too_long`     | Pepper file or hex is longer than 512 chars |
 | `invalid_pepper_hex`  | Pepper file did not contain valid hex   |
 | `low_diversity_pepper` | Pepper bytes had too little diversity  |
+| `low_bit_balance_pepper` | Pepper bits were implausibly imbalanced |
 | `tag_mismatch`        | Keyed validation tag did not match      |
 | `unsupported_version` | Decoded version is not active           |
 | `reserved_label`      | Decoded label is reserved               |
@@ -333,13 +337,17 @@ Set all three key inputs before issuing IDs:
 
 Use `64..512` hex characters for `XCTX_ID_PASSWORD`. The minimum is exactly
 what the command below prints: `64` hex characters, decoded to `32` bytes.
+Accepted values are normalized to 64 internal bytes with SHA-512 before key
+derivation.
 
 ```bash
 export XCTX_ID_PASSWORD="$(python -c 'import secrets; print(secrets.token_hex(32))')"
 ```
 
 Use `64..512` hex characters for the pepper. The raw pepper file is capped at
-512 bytes, so a max-length pepper must not include a trailing newline:
+512 bytes, so a max-length pepper must not include a trailing newline. The same
+hex, byte-diversity, bit-balance, and SHA-512 normalization rules apply to
+`DOMAIN_SALT_HEX`, `XCTX_ID_PASSWORD`, and the pepper:
 
 ```bash
 python -c "import secrets; print(secrets.token_hex(32))" > ~/.sql_hex_id_pepper_file.key

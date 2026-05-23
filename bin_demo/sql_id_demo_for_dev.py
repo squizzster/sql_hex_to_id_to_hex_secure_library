@@ -5,7 +5,7 @@ Run:
     ./bin_demo/sql_id_demo_for_dev.py
     ./bin_demo/sql_id_demo_for_dev.py --int_id 1
     ./bin_demo/sql_id_demo_for_dev.py --int_id 1 --label repair
-    ./bin_demo/sql_id_demo_for_dev.py --hex_id 330293be278aae686fb42aae757556dd
+    ./bin_demo/sql_id_demo_for_dev.py --hex_id f4b745ba77dc1096d657a861e3f80842
 
 For real applications, set XCTX_ID_PASSWORD with a strong hex secret:
     export XCTX_ID_PASSWORD="$(python -c 'import secrets; print(secrets.token_hex(32))')"
@@ -76,27 +76,26 @@ from sql_id_library import (  # noqa: E402 - demo config is set before first pro
     load_sql_id_config_from_file,
     validate_hex,
     validate_hex_label,
+    _decode_config_hex,
 )
 
 os.environ.setdefault(DEMO_ALLOW_BUNDLED_DOMAIN_SALT_ENV, "1")
 
 
 def demo_password_is_valid(value: object) -> bool:
-    """Return whether a demo-provided runtime secret satisfies library syntax."""
-    if not isinstance(value, str):
-        return False
-    if not MIN_PASSWORD_HEX_CHARS <= len(value) <= MAX_PASSWORD_HEX_CHARS:
-        return False
-    if len(value) % 2:
-        return False
     try:
-        decoded = bytes.fromhex(value)
+        _decode_config_hex(
+            name=ENV_PASSWORD_NAME,
+            value=value,
+            min_hex_chars=MIN_PASSWORD_HEX_CHARS,
+            max_hex_chars=MAX_PASSWORD_HEX_CHARS,
+            min_bytes=MIN_PASSWORD_BYTES,
+            max_bytes=MAX_PASSWORD_BYTES,
+            min_unique_bytes=MIN_PASSWORD_UNIQUE_BYTES,
+        )
     except ValueError:
         return False
-    return (
-        MIN_PASSWORD_BYTES <= len(decoded) <= MAX_PASSWORD_BYTES
-        and len(set(decoded)) >= MIN_PASSWORD_UNIQUE_BYTES
-    )
+    return True
 
 
 def warn_if_using_bundled_domain_salt() -> None:
@@ -210,8 +209,8 @@ def build_parser() -> argparse.ArgumentParser:
             "  ./bin_demo/sql_id_demo_for_dev.py --int_id 1\n"
             "  ./bin_demo/sql_id_demo_for_dev.py --int_id 1 --label repair\n"
             "  ./bin_demo/sql_id_demo_for_dev.py --config-file ./conf/test_sql_id_config.yaml --int_id 1 --label repair\n"
-            "  ./bin_demo/sql_id_demo_for_dev.py --hex_id 330293be278aae686fb42aae757556dd\n"
-            "  ./bin_demo/sql_id_demo_for_dev.py --hex_id 91ee852205c1a03a5da06b1d97722582 --label repair\n"
+            "  ./bin_demo/sql_id_demo_for_dev.py --hex_id f4b745ba77dc1096d657a861e3f80842\n"
+            "  ./bin_demo/sql_id_demo_for_dev.py --hex_id 99022391110b81bfe4bf80f3bde16ea2 --label repair\n"
             "  ./bin_demo/sql_id_demo_for_dev.py --strict-config --int_id 1\n\n"
             "Demo labels are loaded from ./conf/test_sql_id_config.yaml: "
             "dry_run=1, plan=2, execute=3, enquire=4, repair=5. Numeric labels "

@@ -5,7 +5,8 @@ Run with:
     python -m pytest
 
 The tests set a safe default test hex secret and per-test pepper file, then also
-cover missing, weak, low-diversity, wrong-secret, and wrong-pepper behavior.
+cover missing, weak, low-diversity, low-bit-balance, wrong-secret, and
+wrong-pepper behavior.
 """
 
 from __future__ import annotations
@@ -23,6 +24,7 @@ TEST_PASSWORD = "00112233445566778899aabbccddeeff" * 2
 OTHER_TEST_PASSWORD = "ffeeddccbbaa99887766554433221100" * 2
 TEST_PEPPER_HEX = "0123456789abcdef" * 4
 OTHER_TEST_PEPPER_HEX = "fedcba9876543210" * 4
+LOW_BIT_BALANCE_HEX = "0102040810204080" * 4
 DEMO_LABELS = {
     "dry_run": 1,
     "plan": 2,
@@ -134,6 +136,8 @@ class TestSqlIdLibrary(unittest.TestCase):
         self.assertEqual(sid.MIN_KEY_INPUT_BYTES, 32)
         self.assertEqual(sid.MAX_KEY_INPUT_BYTES, 256)
         self.assertEqual(sid.MIN_KEY_INPUT_UNIQUE_BYTES, 8)
+        self.assertEqual(sid.KEY_INPUT_BIT_BALANCE_MIN_TAIL_PROBABILITY, 1e-12)
+        self.assertEqual(sid.NORMALIZED_KEY_INPUT_BYTES, 64)
         self.assertEqual(sid.MIN_PASSWORD_HEX_CHARS, 64)
         self.assertEqual(sid.MAX_PASSWORD_HEX_CHARS, 512)
         self.assertEqual(sid.MIN_PASSWORD_BYTES, 32)
@@ -173,6 +177,70 @@ class TestSqlIdLibrary(unittest.TestCase):
         self.assertIsNone(sid.layout_for_hex_length(16))
         self.assertIsNone(sid.layout_for_hex_length(31))
         self.assertIsNone(sid.layout_for_hex_length(True))
+
+    def test_key_input_bit_balance_cutoffs_are_length_aware(self) -> None:
+        cutoffs = [
+            (256, 71, 72),
+            (512, 175, 176),
+            (1024, 397, 398),
+            (2048, 862, 863),
+        ]
+        for n_bits, rejected_low_ones, accepted_low_ones in cutoffs:
+            with self.subTest(n_bits=n_bits):
+                self.assertLessEqual(
+                    sid._binomial_two_sided_tail_probability(n_bits, rejected_low_ones),
+                    sid.KEY_INPUT_BIT_BALANCE_MIN_TAIL_PROBABILITY,
+                )
+                self.assertGreater(
+                    sid._binomial_two_sided_tail_probability(n_bits, accepted_low_ones),
+                    sid.KEY_INPUT_BIT_BALANCE_MIN_TAIL_PROBABILITY,
+                )
+
+    def test_key_inputs_are_sanity_checked_then_normalized_to_sha512(self) -> None:
+        self.assertEqual(len(sid._password_bytes()), sid.NORMALIZED_KEY_INPUT_BYTES)
+        self.assertEqual(len(sid._domain_salt_bytes()), sid.NORMALIZED_KEY_INPUT_BYTES)
+        self.assertEqual(len(sid._pepper_bytes()), sid.NORMALIZED_KEY_INPUT_BYTES)
+        self.assertNotEqual(sid._password_bytes(), bytes.fromhex(TEST_PASSWORD))
+        self.assertNotEqual(sid._pepper_bytes(), bytes.fromhex(TEST_PEPPER_HEX))
+
+        with patched_password("00112233445566778899aabbccddeeff" * 16):
+            self.assertEqual(len(sid._password_bytes()), sid.NORMALIZED_KEY_INPUT_BYTES)
+            self.assertTrue(sid.is_configured())
+
+    def test_key_input_bit_balance_rejects_extreme_manual_values(self) -> None:
+        with patched_password(LOW_BIT_BALANCE_HEX):
+            self.assertFalse(sid.is_configured())
+            result = sid.validate_hex("0" * sid.HEX_CHARS)
+            self.assertFalse(result.ok)
+            self.assertEqual(result.error_code, "bad_config")
+            self.assertIn("bit balance", result.error or "")
+
+        old_domain_salt_hex = sid.DOMAIN_SALT_HEX
+        try:
+            sid.DOMAIN_SALT_HEX = LOW_BIT_BALANCE_HEX
+            sid._derive_material.cache_clear()
+            self.assertFalse(sid.is_configured())
+            result = sid.validate_hex("0" * sid.HEX_CHARS)
+            self.assertFalse(result.ok)
+            self.assertEqual(result.error_code, "bad_config")
+            self.assertIn("DOMAIN_SALT_HEX bit balance", result.error or "")
+        finally:
+            sid.DOMAIN_SALT_HEX = old_domain_salt_hex
+            sid._derive_material.cache_clear()
+
+        pepper_path = TEST_DIR / "low_bit_balance_sql_id_pepper.key"
+        write_test_pepper(pepper_path, LOW_BIT_BALANCE_HEX)
+        try:
+            sid.configure_sql_id({"pepper_file_location": str(pepper_path)})
+            self.assertFalse(sid.is_configured())
+            result = sid.validate_hex("0" * sid.HEX_CHARS)
+            self.assertFalse(result.ok)
+            self.assertEqual(result.error_code, "low_bit_balance_pepper")
+            self.assertIn("bit balance", result.error or "")
+        finally:
+            pepper_path.chmod(0o600) if pepper_path.exists() else None
+            pepper_path.unlink(missing_ok=True)
+            sid.configure_sql_id({"pepper_file_location": str(TEST_PEPPER_PATH)})
 
     def test_unlabeled_public_api_round_trips_edges_and_representatives(self) -> None:
         values: list[object] = [
@@ -233,10 +301,10 @@ class TestSqlIdLibrary(unittest.TestCase):
         self.assertEqual(sid.DOMAIN_SALT_HEX, sid.BUNDLED_DOMAIN_SALT_HEX)
 
         plain_vectors = [
-            (1, "a56301107432cd1196b72a35029ef750"),
-            (sid.SMALL_RANGE_MAX_ID, "c19ff2e8f4aa811b73954054341e3089"),
-            (sid.BIGINT_RANGE_MIN_ID, "eb494dca3f566cd670d30be7bc753905"),
-            (sid.MAX_ID, "b9f011013bd12d04317ad8ca3024d38d"),
+            (1, "dc0f8c4efe8122af4b2c7a1d2815d69e"),
+            (sid.SMALL_RANGE_MAX_ID, "d7611c882cbf04065b6228ad395c696a"),
+            (sid.BIGINT_RANGE_MIN_ID, "7065a0944fe59e71aeabedc910037d5b"),
+            (sid.MAX_ID, "2698eb4949801cb38eacdeb61db54bd8"),
         ]
         for id_value, expected_hex in plain_vectors:
             with self.subTest(id_value=id_value):
@@ -249,9 +317,9 @@ class TestSqlIdLibrary(unittest.TestCase):
 
         with patched_labels(DEMO_LABELS):
             labeled_vectors = [
-                ("dry_run", 1, "97c01cebd7459d0f111f44c4f89d7a42"),
-                ("plan", 1, "bcd663573aa59ca7e07d80ab829c1c24"),
-                ("repair", 1, "84087098ee0aa78589f06630ad0c219f"),
+                ("dry_run", 1, "9bd8aa8c026690ebe365d2b2081ed7c0"),
+                ("plan", 1, "e61ac253ffaabe7bb88f9aaf01280ee0"),
+                ("repair", 1, "b558b13754e9f1733d724ca3d04dfe72"),
             ]
             for label, id_value, expected_hex in labeled_vectors:
                 with self.subTest(label=label, id_value=id_value):
@@ -265,7 +333,7 @@ class TestSqlIdLibrary(unittest.TestCase):
                     self.assertEqual(result.label_id, DEMO_LABELS[label])
                     self.assertEqual(result.label, label)
 
-            repair_hex = "84087098ee0aa78589f06630ad0c219f"
+            repair_hex = "b558b13754e9f1733d724ca3d04dfe72"
             self.assertIsNone(sid.hex_to_id(repair_hex))
             self.assertIsNone(sid.hex_to_id_label(repair_hex, "plan"))
             self.assertEqual(sid.hex_to_id_label(repair_hex, "repair"), 1)
