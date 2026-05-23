@@ -1039,13 +1039,12 @@ def available_labels() -> dict[str, int]:
 
 
 def allowed_versions() -> tuple[int, ...]:
-    """Return the currently accepted public-ID versions."""
-    with _CONFIG_LOCK:
-        versions = set(_ALLOWED_VERSIONS)
-    latest = configured_issue_version()
-    if latest is not None:
-        versions.add(latest)
-    return tuple(sorted(versions))
+    """Return complete key-material versions currently accepted for decoding."""
+    try:
+        accepted_versions, _probe_versions = _version_sets_for_decode()
+    except _ConfigError:
+        return ()
+    return tuple(sorted(accepted_versions))
 
 
 def _allowed_versions() -> frozenset[int]:
@@ -1464,6 +1463,25 @@ def _issue_version() -> int:
     raise _ConfigError("bad_config", "no SQL ID version has any configured key input")
 
 
+def _version_sets_for_decode() -> tuple[frozenset[int], tuple[int, ...]]:
+    """Return accepted versions and safe probe versions for decode."""
+    latest_version = _issue_version()
+    allowed = _allowed_versions()
+    complete_versions = {latest_version}
+    for version in ACTIVE_DECODE_VERSIONS:
+        if version == latest_version or not _version_has_any_key_input(version):
+            continue
+        try:
+            _key_material_for_version(version, DEFAULT_LAYOUT)
+        except _ConfigError:
+            if version in allowed:
+                raise
+            continue
+        complete_versions.add(version)
+    accepted_versions = (complete_versions & allowed) | {latest_version}
+    return frozenset(accepted_versions), tuple(sorted(complete_versions, reverse=True))
+
+
 def configured_issue_version() -> int | None:
     """Return the version used for new IDs, or None when configuration is incomplete."""
     try:
@@ -1742,13 +1760,8 @@ def _decode_public_hex(value: object, *, expected_label: int | None) -> SqlIdVal
 
     try:
         encrypted = int(public_hex, 16)
-        tried_any_configured_version = False
-        allowed = _allowed_versions()
-        latest_version = _issue_version()
-        for candidate_version in sorted(ACTIVE_DECODE_VERSIONS, reverse=True):
-            if not _version_has_any_key_input(candidate_version):
-                continue
-            tried_any_configured_version = True
+        accepted_versions, probe_versions = _version_sets_for_decode()
+        for candidate_version in probe_versions:
             round_keys, tag_key = _key_material_for_version(candidate_version, DEFAULT_LAYOUT)
             plain = _feistel_decrypt(encrypted, round_keys, DEFAULT_LAYOUT)
             version, label_id, range_class, id_value, supplied_tag = _unpack_plain(plain, DEFAULT_LAYOUT)
@@ -1759,7 +1772,7 @@ def _decode_public_hex(value: object, *, expected_label: int | None) -> SqlIdVal
             expected_tag = _tag(version, label_id, range_class, id_value, tag_key, DEFAULT_LAYOUT)
             if not _tags_equal(supplied_tag, expected_tag, range_layout):
                 continue
-            if version != latest_version and version not in allowed:
+            if version not in accepted_versions:
                 raise _ValidationFailure("unsupported_version", "public id version is not allowed")
             if label_id == RESERVED_LABEL:
                 raise _ValidationFailure("reserved_label", "public id uses a reserved label")
@@ -1780,8 +1793,6 @@ def _decode_public_hex(value: object, *, expected_label: int | None) -> SqlIdVal
                 layout=DEFAULT_LAYOUT,
             )
 
-        if not tried_any_configured_version:
-            raise _ConfigError("bad_config", "no SQL ID version has any configured key input")
         raise _ValidationFailure("tag_mismatch", "public id validation tag does not match")
     except _ConfigError as exc:
         return _validation_error(exc.code, exc.message, public_hex=public_hex, layout=DEFAULT_LAYOUT)

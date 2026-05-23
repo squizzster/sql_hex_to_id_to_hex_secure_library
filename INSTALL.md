@@ -83,7 +83,8 @@ create the next exact version instead: `SQL_ID_LIBRARY_DOMAIN_SALT_HEX_v2`,
 `SQL_ID_LIBRARY_PASSWORD_HEX_v2`, and a matching `_v2` pepper file. New IDs use
 the highest fully configured version. The latest configured version is always
 accepted; `allowed_versions` controls which older configured versions remain
-accepted.
+accepted. A higher version with only some inputs present is treated as an
+incomplete rotation and fails closed until completed or removed.
 
 ## 4. Configure SQL ID Settings
 

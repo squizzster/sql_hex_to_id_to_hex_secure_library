@@ -263,7 +263,10 @@ def build_parser() -> argparse.ArgumentParser:
     action.add_argument("--int_id", type=int, help="encode this positive SQL BIGINT ID and print public hex")
     action.add_argument("--hex_id", help="strictly decode this public hex ID and print the SQL BIGINT ID")
     parser.add_argument("--label", help="label name or numeric label id to encode with, or to require when decoding")
-    parser.add_argument("--config-file", help="configure labels and/or pepper path from this .json, .yaml, or .yml file")
+    parser.add_argument(
+        "--config-file",
+        help="configure labels, allowed versions, and/or pepper path from this .json, .yaml, or .yml file",
+    )
     parser.add_argument(
         "--strict-config",
         action="store_true",
