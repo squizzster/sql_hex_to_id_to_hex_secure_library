@@ -33,10 +33,9 @@ For deployed public IDs, use three independent inputs:
 - `XCTX_ID_PASSWORD` in the process environment
 - a disk pepper file, defaulting to `~/.sql_hex_id_pepper_file.key`
 
-Generate each one independently. `DOMAIN_SALT_HEX` must be exactly `64` hex
-characters. `XCTX_ID_PASSWORD` and the pepper must each be `64..256` hex
-characters; the library decodes those hex strings to bytes before key
-derivation.
+Generate each one independently. `DOMAIN_SALT_HEX`, `XCTX_ID_PASSWORD`, and the
+pepper must each be `64..512` hex characters; the library decodes those hex
+strings to `32..256` bytes before key derivation.
 
 ```bash
 python -c "import secrets; print(secrets.token_hex(32))"
@@ -313,7 +312,7 @@ Typical errors include:
 | `unreadable_pepper_file` | Pepper file could not be read        |
 | `bad_pepper_permissions` | Pepper file permissions are unsafe   |
 | `pepper_too_short`    | Pepper hex is shorter than 64 chars     |
-| `pepper_too_long`     | Pepper hex is longer than 256 chars     |
+| `pepper_too_long`     | Pepper file or hex is longer than 512 chars |
 | `invalid_pepper_hex`  | Pepper file did not contain valid hex   |
 | `low_diversity_pepper` | Pepper bytes had too little diversity  |
 | `tag_mismatch`        | Keyed validation tag did not match      |
@@ -332,14 +331,15 @@ Set all three key inputs before issuing IDs:
 2. `XCTX_ID_PASSWORD` in the environment.
 3. A readable pepper file at the configured `pepper_file_location`.
 
-Use `64..256` hex characters for `XCTX_ID_PASSWORD`. The minimum is exactly
+Use `64..512` hex characters for `XCTX_ID_PASSWORD`. The minimum is exactly
 what the command below prints: `64` hex characters, decoded to `32` bytes.
 
 ```bash
 export XCTX_ID_PASSWORD="$(python -c 'import secrets; print(secrets.token_hex(32))')"
 ```
 
-Use `64..256` hex characters for the pepper:
+Use `64..512` hex characters for the pepper. The raw pepper file is capped at
+512 bytes, so a max-length pepper must not include a trailing newline:
 
 ```bash
 python -c "import secrets; print(secrets.token_hex(32))" > ~/.sql_hex_id_pepper_file.key

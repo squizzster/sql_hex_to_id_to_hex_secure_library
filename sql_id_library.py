@@ -57,9 +57,11 @@ Secret configuration:
 
     This v4 scheme requires three independent inputs: DOMAIN_SALT_HEX,
     XCTX_ID_PASSWORD, and a disk pepper file. Replace DOMAIN_SALT_HEX near the
-    top of this file with a deployment-specific 32-byte random hex string, set
-    XCTX_ID_PASSWORD to a separate 64..256 character hex secret, and create the
-    pepper file configured by ``pepper_file_location``.
+    top of this file with a deployment-specific hex string, set
+    XCTX_ID_PASSWORD to a separate hex secret, and create the pepper file
+    configured by ``pepper_file_location``. Each of those three key inputs uses
+    the same 64..512 hex-character contract and is decoded to bytes before key
+    derivation.
 
     Generate each value independently:
 
@@ -109,22 +111,29 @@ from typing import Final
 
 ENV_PASSWORD_NAME: Final[str] = "XCTX_ID_PASSWORD"
 DEMO_ALLOW_BUNDLED_DOMAIN_SALT_ENV: Final[str] = "XCTX_DEMO_ALLOW_BUNDLED_DOMAIN_SALT"
-MIN_PASSWORD_HEX_CHARS: Final[int] = 64
-MAX_PASSWORD_HEX_CHARS: Final[int] = 256
-MIN_PASSWORD_BYTES: Final[int] = 32
-MAX_PASSWORD_BYTES: Final[int] = 128
-MIN_PASSWORD_UNIQUE_BYTES: Final[int] = 8
+MIN_KEY_INPUT_HEX_CHARS: Final[int] = 64
+MAX_KEY_INPUT_HEX_CHARS: Final[int] = 512
+MIN_KEY_INPUT_BYTES: Final[int] = 32
+MAX_KEY_INPUT_BYTES: Final[int] = 256
+MIN_KEY_INPUT_UNIQUE_BYTES: Final[int] = 8
+MIN_PASSWORD_HEX_CHARS: Final[int] = MIN_KEY_INPUT_HEX_CHARS
+MAX_PASSWORD_HEX_CHARS: Final[int] = MAX_KEY_INPUT_HEX_CHARS
+MIN_PASSWORD_BYTES: Final[int] = MIN_KEY_INPUT_BYTES
+MAX_PASSWORD_BYTES: Final[int] = MAX_KEY_INPUT_BYTES
+MIN_PASSWORD_UNIQUE_BYTES: Final[int] = MIN_KEY_INPUT_UNIQUE_BYTES
 PEPPER_FILE_LOCATION_KEY: Final[str] = "pepper_file_location"
 LABELS_CONFIG_KEY: Final[str] = "labels"
 DEFAULT_PEPPER_FILE_LOCATION: Final[str] = "~/.sql_hex_id_pepper_file.key"
-MIN_PEPPER_HEX_CHARS: Final[int] = 64
-MAX_PEPPER_HEX_CHARS: Final[int] = 256
-MIN_PEPPER_BYTES: Final[int] = 32
-MAX_PEPPER_BYTES: Final[int] = 128
-MIN_PEPPER_UNIQUE_BYTES: Final[int] = 8
-DOMAIN_SALT_HEX_CHARS: Final[int] = 64
-DOMAIN_SALT_BYTES: Final[int] = 32
-MIN_DOMAIN_SALT_UNIQUE_BYTES: Final[int] = 8
+MIN_PEPPER_HEX_CHARS: Final[int] = MIN_KEY_INPUT_HEX_CHARS
+MAX_PEPPER_HEX_CHARS: Final[int] = MAX_KEY_INPUT_HEX_CHARS
+MIN_PEPPER_BYTES: Final[int] = MIN_KEY_INPUT_BYTES
+MAX_PEPPER_BYTES: Final[int] = MAX_KEY_INPUT_BYTES
+MIN_PEPPER_UNIQUE_BYTES: Final[int] = MIN_KEY_INPUT_UNIQUE_BYTES
+MIN_DOMAIN_SALT_HEX_CHARS: Final[int] = MIN_KEY_INPUT_HEX_CHARS
+MAX_DOMAIN_SALT_HEX_CHARS: Final[int] = MAX_KEY_INPUT_HEX_CHARS
+MIN_DOMAIN_SALT_BYTES: Final[int] = MIN_KEY_INPUT_BYTES
+MAX_DOMAIN_SALT_BYTES: Final[int] = MAX_KEY_INPUT_BYTES
+MIN_DOMAIN_SALT_UNIQUE_BYTES: Final[int] = MIN_KEY_INPUT_UNIQUE_BYTES
 
 SCHEME_REVISION: Final[int] = 4
 VERSION_BITS: Final[int] = 3
@@ -157,7 +166,7 @@ ROUNDS: Final[int] = 16
 ACTIVE_DECODE_VERSIONS: Final[frozenset[int]] = frozenset({ISSUE_VERSION})
 SUPPORTED_HEX_LENGTHS: Final[tuple[int, ...]] = (HEX_CHARS,)
 
-# Deployment-specific 32-byte domain-separation salt.
+# Deployment-specific domain-separation salt.
 #
 # The bundled value is public and allowed only when the explicit demo/test
 # override is set. Deployed applications must replace it with a private random
@@ -373,7 +382,7 @@ MAX_PUBLIC_HEX_CHARS: Final[int] = HEX_CHARS
 _MAX_PUBLIC_HEX_CHARS: Final[int] = HEX_CHARS
 _MAX_DECIMAL_ID_STRING_CHARS: Final[int] = 32
 _MAX_CONFIG_FILE_BYTES: Final[int] = 2000
-_MAX_PEPPER_FILE_BYTES: Final[int] = MAX_PEPPER_HEX_CHARS + 128
+_MAX_PEPPER_FILE_BYTES: Final[int] = MAX_PEPPER_HEX_CHARS
 
 _CONFIG_LOCK = RLock()
 _PEPPER_FILE_LOCATION: str = DEFAULT_PEPPER_FILE_LOCATION
@@ -388,8 +397,6 @@ __all__ = [
     "DEFAULT_LAYOUT",
     "DEFAULT_PEPPER_FILE_LOCATION",
     "DEMO_ALLOW_BUNDLED_DOMAIN_SALT_ENV",
-    "DOMAIN_SALT_BYTES",
-    "DOMAIN_SALT_HEX_CHARS",
     "DOMAIN_SALT_HEX",
     "ENV_PASSWORD_NAME",
     "HEX_CHARS",
@@ -405,13 +412,22 @@ __all__ = [
     "MAX_ID",
     "MAX_ID_BITS",
     "MAX_LABEL",
+    "MAX_DOMAIN_SALT_BYTES",
+    "MAX_DOMAIN_SALT_HEX_CHARS",
+    "MAX_KEY_INPUT_BYTES",
+    "MAX_KEY_INPUT_HEX_CHARS",
     "MAX_PASSWORD_BYTES",
     "MAX_PASSWORD_HEX_CHARS",
     "MAX_PEPPER_BYTES",
     "MAX_PEPPER_HEX_CHARS",
     "MAX_TAG_BITS",
+    "MIN_DOMAIN_SALT_BYTES",
+    "MIN_DOMAIN_SALT_HEX_CHARS",
     "MIN_DOMAIN_SALT_UNIQUE_BYTES",
     "MIN_ID",
+    "MIN_KEY_INPUT_BYTES",
+    "MIN_KEY_INPUT_HEX_CHARS",
+    "MIN_KEY_INPUT_UNIQUE_BYTES",
     "MIN_PEPPER_BYTES",
     "MIN_PEPPER_HEX_CHARS",
     "MIN_PASSWORD_BYTES",
@@ -486,11 +502,11 @@ class _ValidationFailure(ValueError):
 
 def _registry_is_sane() -> bool:
     """Return True when the fixed layout and reserved ranges are consistent."""
-    if len(BUNDLED_DOMAIN_SALT_HEX) != DOMAIN_SALT_HEX_CHARS:
+    if not MIN_KEY_INPUT_HEX_CHARS <= len(BUNDLED_DOMAIN_SALT_HEX) <= MAX_KEY_INPUT_HEX_CHARS:
         return False
     if not _HEX_CHARS_RE.fullmatch(BUNDLED_DOMAIN_SALT_HEX):
         return False
-    if len(bytes.fromhex(BUNDLED_DOMAIN_SALT_HEX)) != DOMAIN_SALT_BYTES:
+    if not MIN_KEY_INPUT_BYTES <= len(bytes.fromhex(BUNDLED_DOMAIN_SALT_HEX)) <= MAX_KEY_INPUT_BYTES:
         return False
     if ROUNDS < 12:
         return False
@@ -534,17 +550,33 @@ def _registry_is_sane() -> bool:
         return False
     if SUPPORTED_HEX_LENGTHS != (32,):
         return False
-    if DOMAIN_SALT_HEX_CHARS != 64 or DOMAIN_SALT_BYTES != 32:
+    if MIN_KEY_INPUT_HEX_CHARS != 64 or MAX_KEY_INPUT_HEX_CHARS != 512:
         return False
-    if MIN_DOMAIN_SALT_UNIQUE_BYTES != 8:
+    if MIN_KEY_INPUT_BYTES != 32 or MAX_KEY_INPUT_BYTES != 256:
         return False
-    if MIN_PASSWORD_HEX_CHARS != 64 or MAX_PASSWORD_HEX_CHARS != 256:
+    if MIN_KEY_INPUT_UNIQUE_BYTES != 8:
         return False
-    if MIN_PASSWORD_BYTES != 32 or MAX_PASSWORD_BYTES != 128:
+    if MIN_DOMAIN_SALT_HEX_CHARS != MIN_KEY_INPUT_HEX_CHARS:
         return False
-    if MIN_PEPPER_HEX_CHARS != 64 or MAX_PEPPER_HEX_CHARS != 256:
+    if MAX_DOMAIN_SALT_HEX_CHARS != MAX_KEY_INPUT_HEX_CHARS:
         return False
-    if MIN_PEPPER_BYTES != 32 or MAX_PEPPER_BYTES != 128:
+    if MIN_DOMAIN_SALT_BYTES != MIN_KEY_INPUT_BYTES or MAX_DOMAIN_SALT_BYTES != MAX_KEY_INPUT_BYTES:
+        return False
+    if MIN_DOMAIN_SALT_UNIQUE_BYTES != MIN_KEY_INPUT_UNIQUE_BYTES:
+        return False
+    if MIN_PASSWORD_HEX_CHARS != MIN_KEY_INPUT_HEX_CHARS or MAX_PASSWORD_HEX_CHARS != MAX_KEY_INPUT_HEX_CHARS:
+        return False
+    if MIN_PASSWORD_BYTES != MIN_KEY_INPUT_BYTES or MAX_PASSWORD_BYTES != MAX_KEY_INPUT_BYTES:
+        return False
+    if MIN_PASSWORD_UNIQUE_BYTES != MIN_KEY_INPUT_UNIQUE_BYTES:
+        return False
+    if MIN_PEPPER_HEX_CHARS != MIN_KEY_INPUT_HEX_CHARS or MAX_PEPPER_HEX_CHARS != MAX_KEY_INPUT_HEX_CHARS:
+        return False
+    if MIN_PEPPER_BYTES != MIN_KEY_INPUT_BYTES or MAX_PEPPER_BYTES != MAX_KEY_INPUT_BYTES:
+        return False
+    if MIN_PEPPER_UNIQUE_BYTES != MIN_KEY_INPUT_UNIQUE_BYTES:
+        return False
+    if _MAX_PEPPER_FILE_BYTES != MAX_KEY_INPUT_HEX_CHARS:
         return False
     if DEFAULT_PEPPER_FILE_LOCATION != "~/.sql_hex_id_pepper_file.key":
         return False
@@ -977,10 +1009,10 @@ def _domain_salt_bytes() -> bytes:
     domain_salt = _decode_config_hex(
         name="DOMAIN_SALT_HEX",
         value=DOMAIN_SALT_HEX,
-        min_hex_chars=DOMAIN_SALT_HEX_CHARS,
-        max_hex_chars=DOMAIN_SALT_HEX_CHARS,
-        min_bytes=DOMAIN_SALT_BYTES,
-        max_bytes=DOMAIN_SALT_BYTES,
+        min_hex_chars=MIN_DOMAIN_SALT_HEX_CHARS,
+        max_hex_chars=MAX_DOMAIN_SALT_HEX_CHARS,
+        min_bytes=MIN_DOMAIN_SALT_BYTES,
+        max_bytes=MAX_DOMAIN_SALT_BYTES,
         min_unique_bytes=MIN_DOMAIN_SALT_UNIQUE_BYTES,
     )
     if DOMAIN_SALT_HEX.lower() == BUNDLED_DOMAIN_SALT_HEX and os.environ.get(DEMO_ALLOW_BUNDLED_DOMAIN_SALT_ENV) != "1":

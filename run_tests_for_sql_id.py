@@ -50,10 +50,10 @@ def patched_env_var(name: str, value: str | None):
             os.environ.pop(name, None)
 
 
-def write_test_pepper(path: Path, value: str = TEST_PEPPER_HEX, mode: int = 0o400) -> None:
+def write_test_pepper(path: Path, value: str = TEST_PEPPER_HEX, mode: int = 0o400, *, newline: bool = True) -> None:
     """Write a test pepper file with intentionally narrow permissions."""
     path.unlink(missing_ok=True)
-    path.write_text(value + "\n", encoding="ascii")
+    path.write_text(value + ("\n" if newline else ""), encoding="ascii")
     path.chmod(mode)
 
 
@@ -121,22 +121,29 @@ class SqlIdLibraryTests(unittest.TestCase):
         self.assertEqual(sid.BIGINT_RANGE_MIN_ID, 4_294_967_296)
         self.assertEqual(sid.MAX_ID, 18_446_744_073_709_551_615)
         self.assertEqual(sid.MYSQL_UNSIGNED_BIGINT_MAX, sid.MAX_ID)
+        self.assertEqual(sid.MIN_KEY_INPUT_HEX_CHARS, 64)
+        self.assertEqual(sid.MAX_KEY_INPUT_HEX_CHARS, 512)
+        self.assertEqual(sid.MIN_KEY_INPUT_BYTES, 32)
+        self.assertEqual(sid.MAX_KEY_INPUT_BYTES, 256)
+        self.assertEqual(sid.MIN_KEY_INPUT_UNIQUE_BYTES, 8)
         self.assertEqual(sid.MIN_PASSWORD_HEX_CHARS, 64)
-        self.assertEqual(sid.MAX_PASSWORD_HEX_CHARS, 256)
+        self.assertEqual(sid.MAX_PASSWORD_HEX_CHARS, 512)
         self.assertEqual(sid.MIN_PASSWORD_BYTES, 32)
-        self.assertEqual(sid.MAX_PASSWORD_BYTES, 128)
+        self.assertEqual(sid.MAX_PASSWORD_BYTES, 256)
         self.assertEqual(sid.DEFAULT_PEPPER_FILE_LOCATION, "~/.sql_hex_id_pepper_file.key")
         self.assertEqual(sid.MIN_PEPPER_HEX_CHARS, 64)
-        self.assertEqual(sid.MAX_PEPPER_HEX_CHARS, 256)
+        self.assertEqual(sid.MAX_PEPPER_HEX_CHARS, 512)
         self.assertEqual(sid.MIN_PEPPER_BYTES, 32)
-        self.assertEqual(sid.MAX_PEPPER_BYTES, 128)
+        self.assertEqual(sid.MAX_PEPPER_BYTES, 256)
         self.assertEqual(sid.configured_pepper_file_location(), str(TEST_PEPPER_PATH))
         self.assertGreaterEqual(sid.ROUNDS, 12)
-        self.assertEqual(sid.DOMAIN_SALT_HEX_CHARS, 64)
-        self.assertEqual(sid.DOMAIN_SALT_BYTES, 32)
+        self.assertEqual(sid.MIN_DOMAIN_SALT_HEX_CHARS, 64)
+        self.assertEqual(sid.MAX_DOMAIN_SALT_HEX_CHARS, 512)
+        self.assertEqual(sid.MIN_DOMAIN_SALT_BYTES, 32)
+        self.assertEqual(sid.MAX_DOMAIN_SALT_BYTES, 256)
         self.assertEqual(sid.MIN_DOMAIN_SALT_UNIQUE_BYTES, 8)
-        self.assertRegex(sid.DOMAIN_SALT_HEX, re.compile(r"^[0-9a-fA-F]{64}$"))
-        self.assertEqual(len(bytes.fromhex(sid.DOMAIN_SALT_HEX)), 32)
+        self.assertRegex(sid.DOMAIN_SALT_HEX, re.compile(r"^[0-9a-fA-F]{64,512}$"))
+        self.assertTrue(32 <= len(bytes.fromhex(sid.DOMAIN_SALT_HEX)) <= 256)
         self.assertTrue(sid._constants_are_sane())
 
         self.assertEqual(layout.header_bits + sid.SMALL_ID_BITS + sid.SMALL_TAG_BITS, 128)
@@ -593,6 +600,10 @@ class SqlIdLibraryTests(unittest.TestCase):
             self.assertTrue(sid.is_configured())
             self.assertIsNotNone(sid.id_to_hex(1))
 
+        with patched_password("00112233445566778899aabbccddeeff" * 16):
+            self.assertTrue(sid.is_configured())
+            self.assertIsNotNone(sid.id_to_hex(1))
+
     def test_bundled_domain_salt_requires_demo_override(self) -> None:
         self.assertEqual(sid.DOMAIN_SALT_HEX, sid.BUNDLED_DOMAIN_SALT_HEX)
         self.assertTrue(sid.is_configured())
@@ -619,7 +630,7 @@ class SqlIdLibraryTests(unittest.TestCase):
             self.assertIsNotNone(sid.id_to_hex(1))
 
     def test_private_domain_salt_does_not_require_demo_override(self) -> None:
-        private_salt_hex = "1234567890abcdef" * 4
+        private_salt_hex = "1234567890abcdef" * 32
         old_domain_salt_hex = sid.DOMAIN_SALT_HEX
         try:
             sid.DOMAIN_SALT_HEX = private_salt_hex
@@ -635,10 +646,10 @@ class SqlIdLibraryTests(unittest.TestCase):
     def test_domain_salt_hex_is_strictly_validated(self) -> None:
         old_domain_salt_hex = sid.DOMAIN_SALT_HEX
         bad_salts = [
-            "0" * (sid.DOMAIN_SALT_HEX_CHARS - 2),
-            "0" * (sid.DOMAIN_SALT_HEX_CHARS + 1),
-            "g" * sid.DOMAIN_SALT_HEX_CHARS,
-            "00" * sid.DOMAIN_SALT_BYTES,
+            "0" * (sid.MIN_DOMAIN_SALT_HEX_CHARS - 2),
+            "0" * (sid.MAX_DOMAIN_SALT_HEX_CHARS + 2),
+            "g" * sid.MIN_DOMAIN_SALT_HEX_CHARS,
+            "00" * sid.MIN_DOMAIN_SALT_BYTES,
         ]
         try:
             for bad_salt in bad_salts:
@@ -659,7 +670,7 @@ class SqlIdLibraryTests(unittest.TestCase):
         cases = [
             ("missing_sql_id_pepper.key", None, None, "missing_pepper_file"),
             ("short_sql_id_pepper.key", "0123456789abcdef", 0o400, "pepper_too_short"),
-            ("long_sql_id_pepper.key", "01" * 129, 0o400, "pepper_too_long"),
+            ("long_sql_id_pepper.key", "01" * (sid.MAX_PEPPER_BYTES + 1), 0o400, "pepper_too_long"),
             ("odd_sql_id_pepper.key", ("01" * 32) + "0", 0o400, "invalid_pepper_hex"),
             ("nonhex_sql_id_pepper.key", "g" * 64, 0o400, "invalid_pepper_hex"),
             ("low_diversity_sql_id_pepper.key", "00" * 32, 0o400, "low_diversity_pepper"),
@@ -680,6 +691,26 @@ class SqlIdLibraryTests(unittest.TestCase):
                 pepper_path.chmod(0o600) if pepper_path.exists() else None
                 pepper_path.unlink(missing_ok=True)
                 sid.configure_sql_id({"pepper_file_location": str(TEST_PEPPER_PATH)})
+
+    def test_pepper_file_accepts_exact_max_hex_and_rejects_larger_file(self) -> None:
+        pepper_path = TEST_DIR / "max_size_sql_id_pepper.key"
+        max_pepper_hex = "00112233445566778899aabbccddeeff" * 16
+        try:
+            write_test_pepper(pepper_path, max_pepper_hex, newline=False)
+            sid.configure_sql_id({"pepper_file_location": str(pepper_path)})
+            self.assertTrue(sid.is_configured())
+            self.assertIsNotNone(sid.id_to_hex(1))
+
+            write_test_pepper(pepper_path, max_pepper_hex, newline=True)
+            sid.reload_sql_id_pepper()
+            self.fail("expected max pepper plus newline to be rejected")
+        except sid._ConfigError as exc:
+            self.assertEqual(exc.code, "pepper_too_long")
+        finally:
+            pepper_path.chmod(0o600) if pepper_path.exists() else None
+            pepper_path.unlink(missing_ok=True)
+            sid.configure_sql_id({"pepper_file_location": str(TEST_PEPPER_PATH)})
+            sid.reload_sql_id_pepper()
 
     def test_pepper_file_symlink_is_rejected(self) -> None:
         if os.name != "posix" or not hasattr(os, "symlink"):

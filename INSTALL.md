@@ -17,8 +17,8 @@ pip install ".[yaml]"
 ## 1. Set A Deployment Salt
 
 For deployed public IDs, replace `DOMAIN_SALT_HEX` near the top of
-`sql_id_library.py` with a deployment-specific 32-byte random hex value. That
-means exactly `64` hex characters, decoded to `32` bytes:
+`sql_id_library.py` with a deployment-specific random hex value. It must contain
+`64..512` hex characters and is decoded to `32..256` bytes:
 
 ```bash
 python -c "import secrets; print(secrets.token_hex(32))"
@@ -38,7 +38,7 @@ independently.
 ## 2. Set The Runtime Secret
 
 Set `XCTX_ID_PASSWORD` to a separate strong hex secret. It must contain
-`64..256` hex characters and is decoded to `32..128` secret bytes before key
+`64..512` hex characters and is decoded to `32..256` secret bytes before key
 derivation:
 
 ```bash
@@ -56,7 +56,9 @@ The default pepper path is:
 ~/.sql_hex_id_pepper_file.key
 ```
 
-Create it with `64..256` hex characters. The minimum generator is:
+Create it with `64..512` hex characters. The raw pepper file is capped at 512
+bytes, so a max-length pepper must not include a trailing newline. The minimum
+generator is:
 
 ```bash
 python -c "import secrets; print(secrets.token_hex(32))" > ~/.sql_hex_id_pepper_file.key
