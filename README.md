@@ -27,14 +27,15 @@ file, see [INSTALL.md](INSTALL.md).
 
 ## Deployment Hardening
 
-For deployed public IDs, use three independent inputs:
+For deployed public IDs, configure one exact key-material version. New
+deployments normally start with version 1:
 
-- `SQL_ID_LIBRARY_DOMAIN_SALT_HEX` in the process environment
-- `SQL_ID_LIBRARY_PASSWORD_HEX` in the process environment
-- a disk pepper file, defaulting to `~/.sql_hex_id_pepper_file.key`
+- `SQL_ID_LIBRARY_DOMAIN_SALT_HEX_v1` in the process environment
+- `SQL_ID_LIBRARY_PASSWORD_HEX_v1` in the process environment
+- a disk pepper file, defaulting to `~/.sql_hex_id_pepper_file_v1.key`
 
-Generate each one independently. `SQL_ID_LIBRARY_DOMAIN_SALT_HEX`,
-`SQL_ID_LIBRARY_PASSWORD_HEX`, and the pepper must each provide `64..512` hex
+Generate each one independently. `SQL_ID_LIBRARY_DOMAIN_SALT_HEX_v1`,
+`SQL_ID_LIBRARY_PASSWORD_HEX_v1`, and the pepper must each provide `64..512` hex
 characters. The pepper file may include one final line ending from shell
 redirection; other leading or trailing whitespace is rejected. The library
 decodes each value to `32..256` bytes, rejects low byte diversity and extreme
@@ -43,19 +44,23 @@ digest before key derivation. This normalization gives every allowed input
 length the same internal size; it does not add entropy to weak input.
 
 ```bash
-export SQL_ID_LIBRARY_DOMAIN_SALT_HEX="$(python -c 'import secrets; print(secrets.token_hex(32))')"
-export SQL_ID_LIBRARY_PASSWORD_HEX="$(python -c 'import secrets; print(secrets.token_hex(32))')"
+export SQL_ID_LIBRARY_DOMAIN_SALT_HEX_v1="$(python -c 'import secrets; print(secrets.token_hex(32))')"
+export SQL_ID_LIBRARY_PASSWORD_HEX_v1="$(python -c 'import secrets; print(secrets.token_hex(32))')"
 ```
 
 Recommended pepper setup:
 
 ```bash
-python -c "import secrets; print(secrets.token_hex(32))" > ~/.sql_hex_id_pepper_file.key
-chmod 0400 ~/.sql_hex_id_pepper_file.key
+python -c "import secrets; print(secrets.token_hex(32))" > ~/.sql_hex_id_pepper_file_v1.key
+chmod 0400 ~/.sql_hex_id_pepper_file_v1.key
 ```
 
-`SQL_ID_LIBRARY_DOMAIN_SALT_HEX` is required for normal library use. The library
-does not contain a deployment salt fallback.
+The library supports exact versions `1..6`. To create a later version, configure
+all three matching inputs, for example `SQL_ID_LIBRARY_DOMAIN_SALT_HEX_v2`,
+`SQL_ID_LIBRARY_PASSWORD_HEX_v2`, and a `_v2` pepper file. New IDs always use
+the highest fully configured version. That latest version is always accepted for
+decode; `allowed_versions` controls which older configured versions remain
+accepted.
 
 Changing the salt, runtime secret, or pepper after public IDs have been issued makes
 those existing public IDs stop decoding.
@@ -83,7 +88,7 @@ Capacity:
 
 | Field   | Values |
 | ------- | ------ |
-| Version | `0..7`; issues `2`; `1`, `3..6` inactive/future; `0`, `7` reserved |
+| Version | `0..7`; usable `1..6`; new IDs use the highest fully configured version; `0`, `7` reserved |
 | Label   | `0` means no label, `1..30` named, `31` reserved |
 | Range   | `0` for IDs `1..4,294,967,295`; `1` for IDs `4,294,967,296..18,446,744,073,709,551,615` |
 | SQL ID  | BIGINT UNSIGNED range `1..18,446,744,073,709,551,615` |
@@ -152,15 +157,21 @@ configure_sql_id({
 })
 ```
 
-You can also configure only the pepper path, or both values together:
+You can also configure only the v1 pepper path, accepted older versions, labels,
+or a combination:
 
 ```python
 configure_sql_id({
-    "pepper_file_location": "/etc/myapp/sql_hex_id_pepper.key",
+    "pepper_file_location": "/etc/myapp/sql_hex_id_pepper_v1.key",
 })
 
 configure_sql_id({
-    "pepper_file_location": "/etc/myapp/sql_hex_id_pepper.key",
+    "allowed_versions": [1, 2, 3, 4, 5, 6],
+})
+
+configure_sql_id({
+    "pepper_file_location": "/etc/myapp/sql_hex_id_pepper_v1.key",
+    "allowed_versions": [1, 2, 3, 4, 5, 6],
     "labels": {
         "users": 1,
         "plans": 2,
@@ -214,7 +225,8 @@ reload_sql_id_pepper()
 Supported file shapes:
 
 ```yaml
-pepper_file_location: ~/.sql_hex_id_pepper_file.key
+pepper_file_location: ~/.sql_hex_id_pepper_file_v1.key
+allowed_versions: [1, 2, 3, 4, 5, 6]
 labels:
   1: dry_run
   2: plan
@@ -225,7 +237,8 @@ labels:
 
 ```json
 {
-  "pepper_file_location": "~/.sql_hex_id_pepper_file.key",
+  "pepper_file_location": "~/.sql_hex_id_pepper_file_v1.key",
+  "allowed_versions": [1, 2, 3, 4, 5, 6],
   "labels": {
     "dry_run": 1,
     "plan": 2,
@@ -321,7 +334,7 @@ Typical errors include:
 | `low_diversity_pepper` | Pepper bytes had too little diversity  |
 | `low_bit_balance_pepper` | Pepper bits were implausibly imbalanced |
 | `tag_mismatch`        | Keyed validation tag did not match      |
-| `unsupported_version` | Decoded version is not active           |
+| `unsupported_version` | Decoded older version is not allowed    |
 | `reserved_label`      | Decoded label is reserved               |
 | `label_mismatch`      | Decoded label was not the expected one  |
 | `id_out_of_range`     | Decoded ID is outside its canonical range |
@@ -332,30 +345,30 @@ Typical errors include:
 
 Set all three key inputs before issuing IDs:
 
-1. `SQL_ID_LIBRARY_DOMAIN_SALT_HEX` in the environment.
-2. `SQL_ID_LIBRARY_PASSWORD_HEX` in the environment.
+1. `SQL_ID_LIBRARY_DOMAIN_SALT_HEX_v1` in the environment.
+2. `SQL_ID_LIBRARY_PASSWORD_HEX_v1` in the environment.
 3. A readable pepper file at the configured `pepper_file_location`.
 
-Use `64..512` hex characters for `SQL_ID_LIBRARY_DOMAIN_SALT_HEX` and
-`SQL_ID_LIBRARY_PASSWORD_HEX`. The minimum is exactly what these commands print:
+Use `64..512` hex characters for `SQL_ID_LIBRARY_DOMAIN_SALT_HEX_v1` and
+`SQL_ID_LIBRARY_PASSWORD_HEX_v1`. The minimum is exactly what these commands print:
 `64` hex characters, decoded to `32` bytes. Accepted values are normalized to 64
 internal bytes with SHA-512 before key derivation.
 
 ```bash
-export SQL_ID_LIBRARY_DOMAIN_SALT_HEX="$(python -c 'import secrets; print(secrets.token_hex(32))')"
-export SQL_ID_LIBRARY_PASSWORD_HEX="$(python -c 'import secrets; print(secrets.token_hex(32))')"
+export SQL_ID_LIBRARY_DOMAIN_SALT_HEX_v1="$(python -c 'import secrets; print(secrets.token_hex(32))')"
+export SQL_ID_LIBRARY_PASSWORD_HEX_v1="$(python -c 'import secrets; print(secrets.token_hex(32))')"
 ```
 
 Use `64..512` hex characters for the pepper. One final line ending from shell
 redirection is accepted; other leading or trailing whitespace is rejected. The
 raw pepper file is capped at 512 bytes, so a max-length pepper must not include
 a trailing newline. The same hex, byte-diversity, bit-balance, and SHA-512
-normalization rules apply to `SQL_ID_LIBRARY_DOMAIN_SALT_HEX`,
-`SQL_ID_LIBRARY_PASSWORD_HEX`, and the pepper:
+normalization rules apply to `SQL_ID_LIBRARY_DOMAIN_SALT_HEX_v1`,
+`SQL_ID_LIBRARY_PASSWORD_HEX_v1`, and the pepper:
 
 ```bash
-python -c "import secrets; print(secrets.token_hex(32))" > ~/.sql_hex_id_pepper_file.key
-chmod 0400 ~/.sql_hex_id_pepper_file.key
+python -c "import secrets; print(secrets.token_hex(32))" > ~/.sql_hex_id_pepper_file_v1.key
+chmod 0400 ~/.sql_hex_id_pepper_file_v1.key
 ```
 
 On POSIX systems the library rejects symlink pepper paths and unsafe mode bits.
@@ -373,8 +386,8 @@ issued public IDs stop decoding. Do not reuse one value for another.
 
 ## Security Shape
 
-For one fixed expected label, including `label=0`, a random 32-character hex
-string is accepted with probability:
+For one fixed expected label, including `label=0`, and one accepted configured
+version, a random 32-character hex string is accepted with probability:
 
 ```text
 (2^64 - 1) / 2^128
@@ -384,6 +397,14 @@ That is just under:
 
 ```text
 1 in 2^64
+```
+
+If more than one configured version is accepted, multiply that probability by
+the number of accepted versions. With the default `allowed_versions` and all six
+versions fully configured, the strict expected-label surface is still below:
+
+```text
+6 in 2^64
 ```
 
 That overall probability is across the full BIGINT ID space. For a specific
@@ -441,12 +462,14 @@ is:
 175,200 guesses per year per bucket
 ```
 
-At that rate, the expected time to hit any strict expected-label decoder-valid
-handle is roughly:
+At that rate, for one accepted configured version, the expected time to hit any
+strict expected-label decoder-valid handle is roughly:
 
 ```text
 105,289,635,123,913 years per bucket
 ```
+
+Divide that by the number of accepted configured versions.
 
 That still only means decoder-valid.
 

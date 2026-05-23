@@ -16,33 +16,33 @@ pip install ".[yaml]"
 
 ## 1. Set A Deployment Salt
 
-For deployed public IDs, set `SQL_ID_LIBRARY_DOMAIN_SALT_HEX` in the process
-environment. It must contain `64..512` hex characters. The decoded `32..256`
-bytes are sanity-checked and then normalized to a role-separated SHA-512 digest
-before key derivation:
+For a new deployment, start with version 1 and set
+`SQL_ID_LIBRARY_DOMAIN_SALT_HEX_v1` in the process environment. It must contain
+`64..512` hex characters. The decoded `32..256` bytes are sanity-checked and
+then normalized to a role-separated SHA-512 digest before key derivation:
 
 ```bash
-export SQL_ID_LIBRARY_DOMAIN_SALT_HEX="$(python -c 'import secrets; print(secrets.token_hex(32))')"
+export SQL_ID_LIBRARY_DOMAIN_SALT_HEX_v1="$(python -c 'import secrets; print(secrets.token_hex(32))')"
 ```
 
-`SQL_ID_LIBRARY_DOMAIN_SALT_HEX` is required for normal library use. The library
-does not contain a deployment salt fallback.
+The library supports exact versions `1..6`. A later version uses the matching
+suffix, for example `SQL_ID_LIBRARY_DOMAIN_SALT_HEX_v2`.
 
 Treat the salt as one of three independent key inputs, alongside
-`SQL_ID_LIBRARY_PASSWORD_HEX` and the pepper file.
+`SQL_ID_LIBRARY_PASSWORD_HEX_v1` and the pepper file.
 
-Do not reuse the salt as `SQL_ID_LIBRARY_PASSWORD_HEX` or the pepper. Generate all values
+Do not reuse the salt as `SQL_ID_LIBRARY_PASSWORD_HEX_v1` or the pepper. Generate all values
 independently.
 
 ## 2. Set The Runtime Secret
 
-Set `SQL_ID_LIBRARY_PASSWORD_HEX` to a separate strong hex secret. It must contain
+Set `SQL_ID_LIBRARY_PASSWORD_HEX_v1` to a separate strong hex secret. It must contain
 `64..512` hex characters. The decoded `32..256` secret bytes are checked with
 the same rules as the salt and pepper, then normalized to a role-separated
 SHA-512 digest before key derivation:
 
 ```bash
-export SQL_ID_LIBRARY_PASSWORD_HEX="$(python -c 'import secrets; print(secrets.token_hex(32))')"
+export SQL_ID_LIBRARY_PASSWORD_HEX_v1="$(python -c 'import secrets; print(secrets.token_hex(32))')"
 ```
 
 Store this in your normal secret manager or process environment. Do not commit
@@ -53,7 +53,7 @@ it to source control.
 The default pepper path is:
 
 ```text
-~/.sql_hex_id_pepper_file.key
+~/.sql_hex_id_pepper_file_v1.key
 ```
 
 Create it with `64..512` hex characters. One final line ending from shell
@@ -64,8 +64,8 @@ bit-balance, and SHA-512 normalization rules as the salt and runtime secret.
 The minimum generator is:
 
 ```bash
-python -c "import secrets; print(secrets.token_hex(32))" > ~/.sql_hex_id_pepper_file.key
-chmod 0400 ~/.sql_hex_id_pepper_file.key
+python -c "import secrets; print(secrets.token_hex(32))" > ~/.sql_hex_id_pepper_file_v1.key
+chmod 0400 ~/.sql_hex_id_pepper_file_v1.key
 ```
 
 The application process must be able to read this file. On POSIX systems the
@@ -76,17 +76,24 @@ directory owner, or broader filesystem policy. Those are deployment decisions:
 set them in your application, container, service manager, or secrets-management
 layer according to the user and environment that actually run the process.
 
-Changing `SQL_ID_LIBRARY_DOMAIN_SALT_HEX`, `SQL_ID_LIBRARY_PASSWORD_HEX`, or the
+Changing `SQL_ID_LIBRARY_DOMAIN_SALT_HEX_v1`, `SQL_ID_LIBRARY_PASSWORD_HEX_v1`, or the
 pepper after public IDs have been issued makes those existing public IDs stop
-decoding.
+decoding. To rotate key material without invalidating every older ID at once,
+create the next exact version instead: `SQL_ID_LIBRARY_DOMAIN_SALT_HEX_v2`,
+`SQL_ID_LIBRARY_PASSWORD_HEX_v2`, and a matching `_v2` pepper file. New IDs use
+the highest fully configured version. The latest configured version is always
+accepted; `allowed_versions` controls which older configured versions remain
+accepted.
 
 ## 4. Configure SQL ID Settings
 
-Configure labels and/or a custom pepper path in application code:
+Configure labels, accepted older versions, and/or a custom v1 pepper path in
+application code:
 
 ```python
 configure_sql_id({
-    "pepper_file_location": "~/.sql_hex_id_pepper_file.key",
+    "pepper_file_location": "~/.sql_hex_id_pepper_file_v1.key",
+    "allowed_versions": [1, 2, 3, 4, 5, 6],
     "labels": {
         "dry_run": 1,
         "plan": 2,

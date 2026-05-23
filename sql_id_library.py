@@ -43,9 +43,13 @@ Strict decoder probability:
         hex_to_id_label(public_hex, label)    expects the supplied label,
                                               which must resolve to 1..30
 
-    For one expected label, random-valid probability is:
+    For one expected label and one accepted key-material version, random-valid
+    probability is:
 
         (2**64 - 1) / 2**128, just under 2**-64
+
+    Accepting multiple configured versions multiplies that surface by the number
+    of accepted versions.
 
 Generic inspection:
 
@@ -55,15 +59,21 @@ Generic inspection:
 
 Secret configuration:
 
-    This v4 scheme requires three independent inputs: SQL_ID_LIBRARY_DOMAIN_SALT_HEX,
-    SQL_ID_LIBRARY_PASSWORD_HEX, and a disk pepper file. Set both environment
-    variables to independently generated deployment-specific hex strings, and
-    create the pepper file configured by ``pepper_file_location``. Each of those
-    three key inputs uses the same 64..512 hex-character contract. The decoded
+    This scheme supports exact key-material versions 1..6. Version 0 and 7
+    are reserved. Each configured version requires three independently generated
+    inputs with the same version suffix: SQL_ID_LIBRARY_DOMAIN_SALT_HEX_vN,
+    SQL_ID_LIBRARY_PASSWORD_HEX_vN, and a disk pepper file named with ``_vN``
+    before its extension. The configured ``pepper_file_location`` is the ``_v1``
+    path; higher pepper paths are derived by replacing ``_v1`` with ``_vN``.
+    Each key input uses the same 64..512 hex-character contract. The decoded
     bytes are checked for minimum byte diversity and extreme bit imbalance, then
     normalized to a role-separated SHA-512 digest before key derivation. The
     pepper file accepts one final line ending from shell redirection but rejects
     other leading or trailing whitespace.
+
+    New IDs always use the highest fully configured version. That latest version
+    is always accepted for decoding. Older configured versions are accepted only
+    when present in ``allowed_versions``.
 
     Generate each value independently:
 
@@ -110,8 +120,10 @@ from types import MappingProxyType
 from typing import Final
 
 
-ENV_PASSWORD_NAME: Final[str] = "SQL_ID_LIBRARY_PASSWORD_HEX"
-ENV_DOMAIN_SALT_NAME: Final[str] = "SQL_ID_LIBRARY_DOMAIN_SALT_HEX"
+ENV_PASSWORD_BASE_NAME: Final[str] = "SQL_ID_LIBRARY_PASSWORD_HEX"
+ENV_DOMAIN_SALT_BASE_NAME: Final[str] = "SQL_ID_LIBRARY_DOMAIN_SALT_HEX"
+ENV_PASSWORD_NAME: Final[str] = f"{ENV_PASSWORD_BASE_NAME}_v1"
+ENV_DOMAIN_SALT_NAME: Final[str] = f"{ENV_DOMAIN_SALT_BASE_NAME}_v1"
 MIN_KEY_INPUT_HEX_CHARS: Final[int] = 64
 MAX_KEY_INPUT_HEX_CHARS: Final[int] = 512
 MIN_KEY_INPUT_BYTES: Final[int] = 32
@@ -130,7 +142,8 @@ MAX_PASSWORD_BYTES: Final[int] = MAX_KEY_INPUT_BYTES
 MIN_PASSWORD_UNIQUE_BYTES: Final[int] = MIN_KEY_INPUT_UNIQUE_BYTES
 PEPPER_FILE_LOCATION_KEY: Final[str] = "pepper_file_location"
 LABELS_CONFIG_KEY: Final[str] = "labels"
-DEFAULT_PEPPER_FILE_LOCATION: Final[str] = "~/.sql_hex_id_pepper_file.key"
+ALLOWED_VERSIONS_CONFIG_KEY: Final[str] = "allowed_versions"
+DEFAULT_PEPPER_FILE_LOCATION: Final[str] = "~/.sql_hex_id_pepper_file_v1.key"
 MIN_PEPPER_HEX_CHARS: Final[int] = MIN_KEY_INPUT_HEX_CHARS
 MAX_PEPPER_HEX_CHARS: Final[int] = MAX_KEY_INPUT_HEX_CHARS
 MIN_PEPPER_BYTES: Final[int] = MIN_KEY_INPUT_BYTES
@@ -158,7 +171,9 @@ MAX_ID_BITS: Final[int] = BIGINT_ID_BITS
 MIN_TAG_BITS: Final[int] = BIGINT_TAG_BITS
 MAX_TAG_BITS: Final[int] = SMALL_TAG_BITS
 
-ISSUE_VERSION: Final[int] = 2
+MIN_VERSION: Final[int] = 1
+MAX_VERSION: Final[int] = 6
+ISSUE_VERSION: Final[int] = MIN_VERSION
 NO_LABEL: Final[int] = 0
 RESERVED_VERSION: Final[int] = (1 << VERSION_BITS) - 1
 RESERVED_LABEL: Final[int] = (1 << LABEL_BITS) - 1
@@ -170,12 +185,14 @@ MAX_ID: Final[int] = (1 << BIGINT_ID_BITS) - 1
 MYSQL_UNSIGNED_BIGINT_MAX: Final[int] = MAX_ID
 ROUNDS: Final[int] = 16
 
-ACTIVE_DECODE_VERSIONS: Final[frozenset[int]] = frozenset({ISSUE_VERSION})
+ACTIVE_DECODE_VERSIONS: Final[frozenset[int]] = frozenset(range(MIN_VERSION, MAX_VERSION + 1))
+DEFAULT_ALLOWED_VERSIONS: Final[frozenset[int]] = ACTIVE_DECODE_VERSIONS
 SUPPORTED_HEX_LENGTHS: Final[tuple[int, ...]] = (HEX_CHARS,)
 
 _DECIMAL_RE: Final[re.Pattern[str]] = re.compile(r"^[0-9]+$")
 _HEX_CHARS_RE: Final[re.Pattern[str]] = re.compile(r"^[0-9a-fA-F]+$")
 _LABEL_NAME_RE: Final[re.Pattern[str]] = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
+_VERSIONED_PEPPER_FILE_RE: Final[re.Pattern[str]] = re.compile(r"^(.+)_v([1-6])(\.[^/]+)$")
 
 
 @dataclass(frozen=True)
@@ -320,8 +337,10 @@ class SqlIdLayout:
         return (
             f"scheme={SCHEME_REVISION};version_bits={self.version_bits};"
             f"label_bits={self.label_bits};range_bits={self.range_bits};"
-            f"total_bits={self.total_bits};"
-            f"hex_chars={self.hex_chars};issue_version={ISSUE_VERSION};"
+            f"total_bits={self.total_bits};hex_chars={self.hex_chars};"
+            f"min_version={MIN_VERSION};max_version={MAX_VERSION};"
+            f"default_issue_version={ISSUE_VERSION};"
+            f"active_decode_versions={','.join(str(version) for version in sorted(ACTIVE_DECODE_VERSIONS))};"
             f"no_label={NO_LABEL};max_label={MAX_LABEL};"
             f"reserved_label={RESERVED_LABEL};reserved_version={RESERVED_VERSION}"
             ";ranges="
@@ -379,16 +398,21 @@ _MAX_PEPPER_FILE_BYTES: Final[int] = MAX_PEPPER_HEX_CHARS
 
 _CONFIG_LOCK = RLock()
 _PEPPER_FILE_LOCATION: str = DEFAULT_PEPPER_FILE_LOCATION
-_PEPPER_CACHE: tuple[Path, bytes] | None = None
+_PEPPER_CACHE: dict[Path, bytes] = {}
+_ALLOWED_VERSIONS: frozenset[int] = DEFAULT_ALLOWED_VERSIONS
 _LABELS_BY_NAME: Mapping[str, int] = MappingProxyType({})
 _LABEL_NAMES_BY_ID: Mapping[int, str] = MappingProxyType({})
 _CONFIG_FILE_CACHE: dict[Path, Mapping[str, object]] = {}
 
 __all__ = [
     "ACTIVE_DECODE_VERSIONS",
+    "ALLOWED_VERSIONS_CONFIG_KEY",
     "DEFAULT_LAYOUT",
+    "DEFAULT_ALLOWED_VERSIONS",
     "DEFAULT_PEPPER_FILE_LOCATION",
+    "ENV_DOMAIN_SALT_BASE_NAME",
     "ENV_DOMAIN_SALT_NAME",
+    "ENV_PASSWORD_BASE_NAME",
     "ENV_PASSWORD_NAME",
     "HEX_CHARS",
     "BIGINT_ID_BITS",
@@ -404,6 +428,7 @@ __all__ = [
     "MAX_ID",
     "MAX_ID_BITS",
     "MAX_LABEL",
+    "MAX_VERSION",
     "MAX_DOMAIN_SALT_BYTES",
     "MAX_DOMAIN_SALT_HEX_CHARS",
     "MAX_KEY_INPUT_BYTES",
@@ -425,6 +450,7 @@ __all__ = [
     "MIN_PASSWORD_BYTES",
     "MIN_PASSWORD_HEX_CHARS",
     "MIN_TAG_BITS",
+    "MIN_VERSION",
     "MYSQL_UNSIGNED_BIGINT_MAX",
     "NO_LABEL",
     "NORMALIZED_KEY_INPUT_BYTES",
@@ -446,9 +472,11 @@ __all__ = [
     "TOTAL_BITS",
     "VERSION_BITS",
     "available_labels",
+    "allowed_versions",
     "clear_sql_id_config",
     "configure_sql_id",
     "configured_pepper_file_location",
+    "configured_issue_version",
     "hex_to_id",
     "hex_to_id_label",
     "hex_to_parts",
@@ -497,7 +525,13 @@ def _registry_is_sane() -> bool:
     """Return True when the fixed layout and reserved ranges are consistent."""
     if ROUNDS < 12:
         return False
-    if ENV_DOMAIN_SALT_NAME != "SQL_ID_LIBRARY_DOMAIN_SALT_HEX":
+    if ENV_PASSWORD_BASE_NAME != "SQL_ID_LIBRARY_PASSWORD_HEX":
+        return False
+    if ENV_DOMAIN_SALT_BASE_NAME != "SQL_ID_LIBRARY_DOMAIN_SALT_HEX":
+        return False
+    if ENV_PASSWORD_NAME != "SQL_ID_LIBRARY_PASSWORD_HEX_v1":
+        return False
+    if ENV_DOMAIN_SALT_NAME != "SQL_ID_LIBRARY_DOMAIN_SALT_HEX_v1":
         return False
     if VERSION_BITS != 3 or LABEL_BITS != 5 or RANGE_BITS != 1:
         return False
@@ -517,11 +551,15 @@ def _registry_is_sane() -> bool:
         return False
     if SCHEME_REVISION != 4:
         return False
-    if ISSUE_VERSION != 2:
+    if MIN_VERSION != 1 or MAX_VERSION != 6:
         return False
-    if not 1 <= ISSUE_VERSION < RESERVED_VERSION:
+    if ISSUE_VERSION != MIN_VERSION:
         return False
-    if ACTIVE_DECODE_VERSIONS != frozenset({ISSUE_VERSION}):
+    if not MIN_VERSION <= ISSUE_VERSION <= MAX_VERSION < RESERVED_VERSION:
+        return False
+    if ACTIVE_DECODE_VERSIONS != frozenset(range(MIN_VERSION, MAX_VERSION + 1)):
+        return False
+    if DEFAULT_ALLOWED_VERSIONS != ACTIVE_DECODE_VERSIONS:
         return False
     if NO_LABEL != 0 or RESERVED_LABEL != 31 or MAX_LABEL != 30:
         return False
@@ -575,7 +613,7 @@ def _registry_is_sane() -> bool:
         return False
     if _binomial_two_sided_tail_probability(256, 72) <= KEY_INPUT_BIT_BALANCE_MIN_TAIL_PROBABILITY:
         return False
-    if DEFAULT_PEPPER_FILE_LOCATION != "~/.sql_hex_id_pepper_file.key":
+    if DEFAULT_PEPPER_FILE_LOCATION != "~/.sql_hex_id_pepper_file_v1.key":
         return False
 
     layout = DEFAULT_LAYOUT
@@ -655,6 +693,36 @@ def _validate_label_id(label_id: object, *, allow_zero: bool) -> int:
     return label_id
 
 
+def _validate_version_id(version: object) -> int:
+    """Validate one public-ID key-material version."""
+    if isinstance(version, bool) or not isinstance(version, int):
+        raise _InputError(f"version must be an integer {MIN_VERSION}..{MAX_VERSION}")
+    if not MIN_VERSION <= version <= MAX_VERSION:
+        raise _InputError(f"version must be {MIN_VERSION}..{MAX_VERSION}")
+    return version
+
+
+def _validated_allowed_versions(versions: object) -> frozenset[int]:
+    """Validate an allowed_versions config value."""
+    if isinstance(versions, (str, bytes)) or not isinstance(versions, (list, tuple, set, frozenset)):
+        raise ValueError(f"{ALLOWED_VERSIONS_CONFIG_KEY} must be a list of versions")
+
+    validated: list[int] = []
+    seen: set[int] = set()
+    for raw_version in versions:
+        try:
+            version = _validate_version_id(raw_version)
+        except _InputError as exc:
+            raise ValueError(str(exc)) from exc
+        if version in seen:
+            raise ValueError(f"duplicate allowed version: {version}")
+        seen.add(version)
+        validated.append(version)
+    if not validated:
+        raise ValueError(f"{ALLOWED_VERSIONS_CONFIG_KEY} must not be empty")
+    return frozenset(validated)
+
+
 def _coerce_label(label: object, *, allow_zero: bool) -> int:
     """Resolve an int label id or configured label name into label bits."""
     if isinstance(label, str):
@@ -701,6 +769,9 @@ def _validate_pepper_file_location(value: object) -> str:
         raise ValueError(f"{PEPPER_FILE_LOCATION_KEY} must not be empty")
     if "\x00" in location:
         raise ValueError(f"{PEPPER_FILE_LOCATION_KEY} must not contain NUL bytes")
+    match = _VERSIONED_PEPPER_FILE_RE.fullmatch(Path(location).name)
+    if match is None or int(match.group(2)) != MIN_VERSION:
+        raise ValueError(f"{PEPPER_FILE_LOCATION_KEY} filename must end with _v{MIN_VERSION}.<extension>")
     return location
 
 
@@ -709,13 +780,13 @@ def _validated_sql_id_config(config: Mapping[str, object]) -> dict[str, object]:
     if not isinstance(config, Mapping):
         raise ValueError("SQL ID config must be a mapping")
 
-    allowed_keys = {PEPPER_FILE_LOCATION_KEY, LABELS_CONFIG_KEY}
+    allowed_keys = {PEPPER_FILE_LOCATION_KEY, LABELS_CONFIG_KEY, ALLOWED_VERSIONS_CONFIG_KEY}
     unknown_keys = set(config) - allowed_keys
     if unknown_keys:
         unknown = ", ".join(sorted(str(key) for key in unknown_keys))
         raise ValueError(f"unknown SQL ID config key(s): {unknown}")
     if not any(key in config for key in allowed_keys):
-        raise ValueError("SQL ID config must define labels, pepper_file_location, or both")
+        raise ValueError("SQL ID config must define labels, pepper_file_location, allowed_versions, or a combination")
 
     normalized: dict[str, object] = {}
     if PEPPER_FILE_LOCATION_KEY in config:
@@ -723,23 +794,28 @@ def _validated_sql_id_config(config: Mapping[str, object]) -> dict[str, object]:
     if LABELS_CONFIG_KEY in config:
         by_name, _by_id = _validated_label_maps(_labels_from_loaded_data(config[LABELS_CONFIG_KEY]))
         normalized[LABELS_CONFIG_KEY] = by_name
+    if ALLOWED_VERSIONS_CONFIG_KEY in config:
+        normalized[ALLOWED_VERSIONS_CONFIG_KEY] = _validated_allowed_versions(config[ALLOWED_VERSIONS_CONFIG_KEY])
     return normalized
 
 
 def configure_sql_id(config: Mapping[str, object]) -> None:
-    """Configure the local SQL ID pepper-file location and/or label registry.
+    """Configure the local SQL ID pepper path, allowed versions, and/or labels.
 
     The pepper file is key material. The label registry is local metadata only:
     public IDs store numeric label bits, not label names. Missing config keys
     leave the current in-process value unchanged.
     """
-    global _PEPPER_FILE_LOCATION, _PEPPER_CACHE, _LABELS_BY_NAME, _LABEL_NAMES_BY_ID
+    global _PEPPER_FILE_LOCATION, _PEPPER_CACHE, _ALLOWED_VERSIONS, _LABELS_BY_NAME, _LABEL_NAMES_BY_ID
 
     normalized = _validated_sql_id_config(config)
     with _CONFIG_LOCK:
         if PEPPER_FILE_LOCATION_KEY in normalized:
             _PEPPER_FILE_LOCATION = normalized[PEPPER_FILE_LOCATION_KEY]  # type: ignore[assignment]
-            _PEPPER_CACHE = None
+            _PEPPER_CACHE = {}
+            _derive_material.cache_clear()
+        if ALLOWED_VERSIONS_CONFIG_KEY in normalized:
+            _ALLOWED_VERSIONS = normalized[ALLOWED_VERSIONS_CONFIG_KEY]  # type: ignore[assignment]
             _derive_material.cache_clear()
         if LABELS_CONFIG_KEY in normalized:
             by_name, by_id = _validated_label_maps(normalized[LABELS_CONFIG_KEY])  # type: ignore[arg-type]
@@ -901,7 +977,8 @@ def load_sql_id_config_from_file(path: str | os.PathLike[str]) -> None:
     JSON support uses the Python standard library. YAML support is optional and
     requires PyYAML to be installed. Supported mapping shape:
 
-        {"pepper_file_location": "~/.sql_hex_id_pepper_file.key",
+        {"pepper_file_location": "~/.sql_hex_id_pepper_file_v1.key",
+         "allowed_versions": [1, 2, 3, 4, 5, 6],
          "labels": {"dry_run": 1, "plan": 2}}
 
     If same-stem files exist in more than one supported format, all available
@@ -936,12 +1013,13 @@ def reload_sql_id_config_from_file(path: str | os.PathLike[str]) -> None:
 
 
 def clear_sql_id_config() -> None:
-    """Reset the pepper-file location, labels, and cached file-loaded config."""
-    global _PEPPER_FILE_LOCATION, _PEPPER_CACHE, _LABELS_BY_NAME, _LABEL_NAMES_BY_ID
+    """Reset pepper path, allowed versions, labels, and cached file config."""
+    global _PEPPER_FILE_LOCATION, _PEPPER_CACHE, _ALLOWED_VERSIONS, _LABELS_BY_NAME, _LABEL_NAMES_BY_ID
 
     with _CONFIG_LOCK:
         _PEPPER_FILE_LOCATION = DEFAULT_PEPPER_FILE_LOCATION
-        _PEPPER_CACHE = None
+        _PEPPER_CACHE = {}
+        _ALLOWED_VERSIONS = DEFAULT_ALLOWED_VERSIONS
         _LABELS_BY_NAME = MappingProxyType({})
         _LABEL_NAMES_BY_ID = MappingProxyType({})
         _CONFIG_FILE_CACHE.clear()
@@ -958,6 +1036,21 @@ def available_labels() -> dict[str, int]:
     """Return a copy of the configured local label-name lookup."""
     with _CONFIG_LOCK:
         return dict(_LABELS_BY_NAME)
+
+
+def allowed_versions() -> tuple[int, ...]:
+    """Return the currently accepted public-ID versions."""
+    with _CONFIG_LOCK:
+        versions = set(_ALLOWED_VERSIONS)
+    latest = configured_issue_version()
+    if latest is not None:
+        versions.add(latest)
+    return tuple(sorted(versions))
+
+
+def _allowed_versions() -> frozenset[int]:
+    with _CONFIG_LOCK:
+        return _ALLOWED_VERSIONS
 
 
 def _label_name_for_id(label_id: int) -> str | None:
@@ -1055,38 +1148,109 @@ def _normalize_key_input(role: bytes, decoded: bytes) -> bytes:
     ).digest()
 
 
-def _password_bytes() -> bytes:
-    """Return normalized runtime secret bytes or raise a config error."""
-    password = _decode_config_hex(
-        name=ENV_PASSWORD_NAME,
-        value=os.environ.get(ENV_PASSWORD_NAME),
+def _versioned_env_name(base_name: str, version: int) -> str:
+    """Return the configured environment variable name for one key version."""
+    return f"{base_name}_v{version}"
+
+
+def _versioned_env_bytes(
+    *,
+    base_name: str,
+    role: bytes,
+    target_version: int,
+    min_hex_chars: int,
+    max_hex_chars: int,
+    min_bytes: int,
+    max_bytes: int,
+    min_unique_bytes: int,
+) -> tuple[bytes, int]:
+    """Return normalized bytes and source version for one exact versioned env role."""
+    name = _versioned_env_name(base_name, target_version)
+    decoded = _decode_config_hex(
+        name=name,
+        value=os.environ.get(name),
+        min_hex_chars=min_hex_chars,
+        max_hex_chars=max_hex_chars,
+        min_bytes=min_bytes,
+        max_bytes=max_bytes,
+        min_unique_bytes=min_unique_bytes,
+    )
+    return _normalize_key_input(role, decoded), target_version
+
+
+def _password_bytes_for_version(target_version: int) -> tuple[bytes, int]:
+    """Return normalized runtime secret bytes and source version."""
+    return _versioned_env_bytes(
+        base_name=ENV_PASSWORD_BASE_NAME,
+        role=_PASSWORD_KEY_INPUT_ROLE,
+        target_version=target_version,
         min_hex_chars=MIN_PASSWORD_HEX_CHARS,
         max_hex_chars=MAX_PASSWORD_HEX_CHARS,
         min_bytes=MIN_PASSWORD_BYTES,
         max_bytes=MAX_PASSWORD_BYTES,
         min_unique_bytes=MIN_PASSWORD_UNIQUE_BYTES,
     )
-    return _normalize_key_input(_PASSWORD_KEY_INPUT_ROLE, password)
 
 
-def _domain_salt_bytes() -> bytes:
-    """Return normalized domain salt bytes or raise a config error."""
-    domain_salt = _decode_config_hex(
-        name=ENV_DOMAIN_SALT_NAME,
-        value=os.environ.get(ENV_DOMAIN_SALT_NAME),
+def _password_bytes(version: int = ISSUE_VERSION) -> bytes:
+    """Return normalized runtime secret bytes for one version or raise a config error."""
+    return _password_bytes_for_version(_validate_version_id(version))[0]
+
+
+def _domain_salt_bytes_for_version(target_version: int) -> tuple[bytes, int]:
+    """Return normalized domain salt bytes and source version."""
+    return _versioned_env_bytes(
+        base_name=ENV_DOMAIN_SALT_BASE_NAME,
+        role=_DOMAIN_SALT_KEY_INPUT_ROLE,
+        target_version=target_version,
         min_hex_chars=MIN_DOMAIN_SALT_HEX_CHARS,
         max_hex_chars=MAX_DOMAIN_SALT_HEX_CHARS,
         min_bytes=MIN_DOMAIN_SALT_BYTES,
         max_bytes=MAX_DOMAIN_SALT_BYTES,
         min_unique_bytes=MIN_DOMAIN_SALT_UNIQUE_BYTES,
     )
-    return _normalize_key_input(_DOMAIN_SALT_KEY_INPUT_ROLE, domain_salt)
+
+
+def _domain_salt_bytes(version: int = ISSUE_VERSION) -> bytes:
+    """Return normalized domain salt bytes for one version or raise a config error."""
+    return _domain_salt_bytes_for_version(_validate_version_id(version))[0]
 
 
 def _configured_pepper_path() -> Path:
     with _CONFIG_LOCK:
         location = _PEPPER_FILE_LOCATION
     return Path(location).expanduser()
+
+
+def _versioned_pepper_path(main_path: Path, version: int) -> Path:
+    """Return the pepper path for one version from the configured _v1 path."""
+    match = _VERSIONED_PEPPER_FILE_RE.fullmatch(main_path.name)
+    if match is None or int(match.group(2)) != MIN_VERSION:
+        raise _ConfigError(
+            "bad_config",
+            f"{PEPPER_FILE_LOCATION_KEY} filename must end with _v{MIN_VERSION}.<extension>",
+        )
+    return main_path.with_name(f"{match.group(1)}_v{version}{match.group(3)}")
+
+
+def _path_exists_no_follow(path: Path) -> bool:
+    """Return whether a path itself exists, including symlinks."""
+    try:
+        path.lstat()
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise _ConfigError("unreadable_pepper_file", f"could not stat pepper file: {exc}") from exc
+
+
+def _version_has_any_key_input(version: int) -> bool:
+    """Return True when any key input exists for one exact version."""
+    if _versioned_env_name(ENV_PASSWORD_BASE_NAME, version) in os.environ:
+        return True
+    if _versioned_env_name(ENV_DOMAIN_SALT_BASE_NAME, version) in os.environ:
+        return True
+    return _path_exists_no_follow(_versioned_pepper_path(_configured_pepper_path(), version))
 
 
 def _validate_pepper_permissions(path: Path, file_stat: os.stat_result) -> None:
@@ -1184,31 +1348,41 @@ def _read_pepper_bytes_from_path(path: Path) -> bytes:
     return _normalize_key_input(_PEPPER_KEY_INPUT_ROLE, pepper)
 
 
-def _pepper_bytes() -> bytes:
-    """Return cached normalized pepper bytes for the configured disk file."""
+def _cached_pepper_bytes(path: Path) -> bytes:
+    """Return cached normalized pepper bytes for one concrete path."""
     global _PEPPER_CACHE
 
-    with _CONFIG_LOCK:
-        path = _configured_pepper_path()
-        cache_key = Path(os.path.abspath(path))
-        if _PEPPER_CACHE is not None and _PEPPER_CACHE[0] == cache_key:
-            return _PEPPER_CACHE[1]
-
-        pepper = _read_pepper_bytes_from_path(path)
-        _PEPPER_CACHE = (cache_key, pepper)
+    cache_key = Path(os.path.abspath(path))
+    pepper = _PEPPER_CACHE.get(cache_key)
+    if pepper is not None:
         return pepper
+
+    pepper = _read_pepper_bytes_from_path(path)
+    _PEPPER_CACHE[cache_key] = pepper
+    return pepper
+
+
+def _pepper_bytes_for_version(target_version: int) -> tuple[bytes, int]:
+    """Return normalized pepper bytes and source version for one exact target version."""
+    main_path = _configured_pepper_path()
+    with _CONFIG_LOCK:
+        path = _versioned_pepper_path(main_path, target_version)
+        return _cached_pepper_bytes(path), target_version
+
+
+def _pepper_bytes(version: int = ISSUE_VERSION) -> bytes:
+    """Return cached normalized pepper bytes for one version."""
+    return _pepper_bytes_for_version(_validate_version_id(version))[0]
 
 
 def reload_sql_id_pepper() -> None:
-    """Explicitly re-read and cache the currently configured pepper file."""
+    """Explicitly clear cached pepper bytes and re-read the current issue-version pepper."""
     global _PEPPER_CACHE
 
     with _CONFIG_LOCK:
-        path = _configured_pepper_path()
-        cache_key = Path(os.path.abspath(path))
-        pepper = _read_pepper_bytes_from_path(path)
-        _PEPPER_CACHE = (cache_key, pepper)
+        _PEPPER_CACHE = {}
         _derive_material.cache_clear()
+        _pepper_bytes_for_version(_issue_version())
 
 
 @lru_cache(maxsize=32)
@@ -1217,6 +1391,7 @@ def _derive_material(
     pepper_bytes: bytes,
     domain_salt_bytes: bytes,
     layout: SqlIdLayout,
+    version: int,
 ) -> tuple[tuple[bytes, ...], bytes]:
     """Derive layout-specific Feistel round keys and tag key from normalized inputs."""
     root_key = hmac.new(
@@ -1224,6 +1399,8 @@ def _derive_material(
         (
             b"xctx-sql-id-root-v4:"
             + layout.domain_label()
+            + b":version:"
+            + version.to_bytes(1, "big")
             + b":salt:"
             + domain_salt_bytes
             + b":pepper:"
@@ -1259,14 +1436,45 @@ def _derive_material(
     return outer_round_keys, tag_key
 
 
-def _key_material(layout: SqlIdLayout = DEFAULT_LAYOUT) -> tuple[tuple[bytes, ...], bytes]:
-    """Return configured key material for the fixed layout or raise an error."""
+def _key_material_for_version(version: int, layout: SqlIdLayout = DEFAULT_LAYOUT) -> tuple[tuple[bytes, ...], bytes]:
+    """Return configured key material for one exact public-ID version."""
     if layout != DEFAULT_LAYOUT or not _registry_is_sane():
         raise _ConfigError("bad_config", "invalid sql_id_library layout")
-    domain_salt_bytes = _domain_salt_bytes()
-    password_bytes = _password_bytes()
-    pepper_bytes = _pepper_bytes()
-    return _derive_material(password_bytes, pepper_bytes, domain_salt_bytes, layout)
+    version = _validate_version_id(version)
+    domain_salt_bytes, _domain_salt_version = _domain_salt_bytes_for_version(version)
+    password_bytes, _password_version = _password_bytes_for_version(version)
+    pepper_bytes, _pepper_version = _pepper_bytes_for_version(version)
+    return _derive_material(password_bytes, pepper_bytes, domain_salt_bytes, layout, version)
+
+
+def _issue_version() -> int:
+    """Return the highest fully configured version for new public IDs."""
+    saw_any_input = False
+    for version in range(MAX_VERSION, MIN_VERSION - 1, -1):
+        if not _version_has_any_key_input(version):
+            continue
+        saw_any_input = True
+        try:
+            _key_material_for_version(version, DEFAULT_LAYOUT)
+            return version
+        except _ConfigError:
+            raise
+    if saw_any_input:
+        raise _ConfigError("bad_config", "no SQL ID version is fully configured")
+    raise _ConfigError("bad_config", "no SQL ID version has any configured key input")
+
+
+def configured_issue_version() -> int | None:
+    """Return the version used for new IDs, or None when configuration is incomplete."""
+    try:
+        return _issue_version()
+    except Exception:  # noqa: BLE001 - configuration probe must not crash callers
+        return None
+
+
+def _key_material(layout: SqlIdLayout = DEFAULT_LAYOUT, *, version: int | None = None) -> tuple[tuple[bytes, ...], bytes]:
+    """Return configured key material for the fixed layout or raise an error."""
+    return _key_material_for_version(_issue_version() if version is None else version, layout)
 
 
 def is_configured() -> bool:
@@ -1450,8 +1658,9 @@ def _unpack_plain(value: int, layout: SqlIdLayout = DEFAULT_LAYOUT) -> tuple[int
 def _encode_with_label(id_value: object, label_id: int) -> str | None:
     try:
         sql_id = _coerce_id(id_value, DEFAULT_LAYOUT)
-        round_keys, tag_key = _key_material(DEFAULT_LAYOUT)
-        plain = _pack_plain(ISSUE_VERSION, label_id, sql_id, tag_key, DEFAULT_LAYOUT)
+        issue_version = _issue_version()
+        round_keys, tag_key = _key_material_for_version(issue_version, DEFAULT_LAYOUT)
+        plain = _pack_plain(issue_version, label_id, sql_id, tag_key, DEFAULT_LAYOUT)
         encrypted = _feistel_encrypt(plain, round_keys, DEFAULT_LAYOUT)
         return f"{encrypted:0{HEX_CHARS}x}"
     except Exception:  # noqa: BLE001 - public convenience API returns None
@@ -1532,35 +1741,48 @@ def _decode_public_hex(value: object, *, expected_label: int | None) -> SqlIdVal
     public_hex = value.lower()
 
     try:
-        round_keys, tag_key = _key_material(DEFAULT_LAYOUT)
         encrypted = int(public_hex, 16)
-        plain = _feistel_decrypt(encrypted, round_keys, DEFAULT_LAYOUT)
-        version, label_id, range_class, id_value, supplied_tag = _unpack_plain(plain, DEFAULT_LAYOUT)
-        range_layout = DEFAULT_LAYOUT.range_for_class(range_class)
+        tried_any_configured_version = False
+        allowed = _allowed_versions()
+        latest_version = _issue_version()
+        for candidate_version in sorted(ACTIVE_DECODE_VERSIONS, reverse=True):
+            if not _version_has_any_key_input(candidate_version):
+                continue
+            tried_any_configured_version = True
+            round_keys, tag_key = _key_material_for_version(candidate_version, DEFAULT_LAYOUT)
+            plain = _feistel_decrypt(encrypted, round_keys, DEFAULT_LAYOUT)
+            version, label_id, range_class, id_value, supplied_tag = _unpack_plain(plain, DEFAULT_LAYOUT)
+            if version != candidate_version:
+                continue
+            range_layout = DEFAULT_LAYOUT.range_for_class(range_class)
 
-        expected_tag = _tag(version, label_id, range_class, id_value, tag_key, DEFAULT_LAYOUT)
-        if not _tags_equal(supplied_tag, expected_tag, range_layout):
-            raise _ValidationFailure("tag_mismatch", "public id validation tag does not match")
-        if version not in ACTIVE_DECODE_VERSIONS:
-            raise _ValidationFailure("unsupported_version", "public id uses an inactive version")
-        if label_id == RESERVED_LABEL:
-            raise _ValidationFailure("reserved_label", "public id uses a reserved label")
-        if expected_label is not None and label_id != expected_label:
-            raise _ValidationFailure("label_mismatch", "public id label does not match the expected label")
-        if not range_layout.min_id <= id_value <= range_layout.max_id:
-            raise _ValidationFailure("id_out_of_range", "decoded id is outside the canonical range")
+            expected_tag = _tag(version, label_id, range_class, id_value, tag_key, DEFAULT_LAYOUT)
+            if not _tags_equal(supplied_tag, expected_tag, range_layout):
+                continue
+            if version != latest_version and version not in allowed:
+                raise _ValidationFailure("unsupported_version", "public id version is not allowed")
+            if label_id == RESERVED_LABEL:
+                raise _ValidationFailure("reserved_label", "public id uses a reserved label")
+            if expected_label is not None and label_id != expected_label:
+                raise _ValidationFailure("label_mismatch", "public id label does not match the expected label")
+            if not range_layout.min_id <= id_value <= range_layout.max_id:
+                raise _ValidationFailure("id_out_of_range", "decoded id is outside the canonical range")
 
-        return SqlIdValidation(
-            ok=True,
-            id=id_value,
-            public_hex=public_hex,
-            label_id=label_id,
-            label=_label_name_for_id(label_id),
-            range_class=range_class,
-            tag_bits=range_layout.tag_bits,
-            version=version,
-            layout=DEFAULT_LAYOUT,
-        )
+            return SqlIdValidation(
+                ok=True,
+                id=id_value,
+                public_hex=public_hex,
+                label_id=label_id,
+                label=_label_name_for_id(label_id),
+                range_class=range_class,
+                tag_bits=range_layout.tag_bits,
+                version=version,
+                layout=DEFAULT_LAYOUT,
+            )
+
+        if not tried_any_configured_version:
+            raise _ConfigError("bad_config", "no SQL ID version has any configured key input")
+        raise _ValidationFailure("tag_mismatch", "public id validation tag does not match")
     except _ConfigError as exc:
         return _validation_error(exc.code, exc.message, public_hex=public_hex, layout=DEFAULT_LAYOUT)
     except _ValidationFailure as exc:

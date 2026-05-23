@@ -7,10 +7,10 @@ Run:
     ./bin_demo/sql_id_demo_for_dev.py --int_id 1 --label repair
     ./bin_demo/sql_id_demo_for_dev.py --hex_id f4b745ba77dc1096d657a861e3f80842
 
-For real applications, set SQL_ID_LIBRARY_PASSWORD_HEX with a strong hex secret:
-    export SQL_ID_LIBRARY_PASSWORD_HEX="$(python -c 'import secrets; print(secrets.token_hex(32))')"
+For real applications, set SQL_ID_LIBRARY_PASSWORD_HEX_v1 with a strong hex secret:
+    export SQL_ID_LIBRARY_PASSWORD_HEX_v1="$(python -c 'import secrets; print(secrets.token_hex(32))')"
 
-Also set SQL_ID_LIBRARY_DOMAIN_SALT_HEX and create a pepper file for deployed
+Also set SQL_ID_LIBRARY_DOMAIN_SALT_HEX_v1 and create a v1 pepper file for deployed
 public IDs.
 """
 
@@ -33,7 +33,7 @@ USING_DEMO_HARD_CODED_PEPPER = False
 _DEMO_ENV_RESTORE: dict[str, str | None] = {}
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_DEMO_CONFIG_PATH = PROJECT_ROOT / "conf" / "test_sql_id_config.yaml"
-DEMO_PEPPER_PATH = Path("/tmp/sql_id_library_demo_pepper_please_create_your_own_and_delete_me.key")
+DEMO_PEPPER_PATH = Path("/tmp/sql_id_library_demo_pepper_please_create_your_own_and_delete_me_v1.key")
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -46,7 +46,6 @@ from sql_id_library import (  # noqa: E402 - demo config is set before first pro
     BIGINT_RANGE_MIN_ID,
     BIGINT_TAG_BITS,
     MAX_ID_BITS,
-    ISSUE_VERSION,
     LABEL_BITS,
     MAX_ID,
     MAX_LABEL,
@@ -71,6 +70,7 @@ from sql_id_library import (  # noqa: E402 - demo config is set before first pro
     available_labels,
     configure_sql_id,
     configured_pepper_file_location,
+    configured_issue_version,
     hex_to_id,
     hex_to_id_label,
     hex_to_parts,
@@ -137,8 +137,8 @@ def ensure_demo_config(*, strict: bool) -> None:
         raise SystemExit(
             f"{ENV_DOMAIN_SALT_NAME}, {ENV_PASSWORD_NAME}, the pepper file, or some combination is missing or invalid. "
             "Configure them with:\n"
-            "  export SQL_ID_LIBRARY_DOMAIN_SALT_HEX=\"$(python -c 'import secrets; print(secrets.token_hex(32))')\"\n"
-            "  export SQL_ID_LIBRARY_PASSWORD_HEX=\"$(python -c 'import secrets; print(secrets.token_hex(32))')\"\n"
+            f"  export {ENV_DOMAIN_SALT_NAME}=\"$(python -c 'import secrets; print(secrets.token_hex(32))')\"\n"
+            f"  export {ENV_PASSWORD_NAME}=\"$(python -c 'import secrets; print(secrets.token_hex(32))')\"\n"
             f"  python -c \"import secrets; print(secrets.token_hex(32))\" > {DEFAULT_PEPPER_FILE_LOCATION}\n"
             f"  chmod 0400 {DEFAULT_PEPPER_FILE_LOCATION}"
         )
@@ -254,8 +254,8 @@ def build_parser() -> argparse.ArgumentParser:
             "  ./bin_demo/sql_id_demo_for_dev.py --strict-config --int_id 1\n\n"
             "Demo labels are loaded from ./conf/test_sql_id_config.yaml: "
             "dry_run=1, plan=2, execute=3, enquire=4, repair=5. Numeric labels "
-            "1..30 also work. Set SQL_ID_LIBRARY_DOMAIN_SALT_HEX and "
-            "SQL_ID_LIBRARY_PASSWORD_HEX for stable results across separate commands."
+            f"1..30 also work. Set {ENV_DOMAIN_SALT_NAME} and "
+            f"{ENV_PASSWORD_NAME} for stable results across separate commands."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -344,7 +344,7 @@ def show_default_demo() -> None:
     print("Bit layout")
     print("----------")
     print(f"total bits:   {TOTAL_BITS} ({HEX_CHARS} hex chars)")
-    print(f"version bits: {VERSION_BITS} (currently issuing version {ISSUE_VERSION})")
+    print(f"version bits: {VERSION_BITS} (currently issuing version {configured_issue_version()})")
     print(
         f"label bits:   {LABEL_BITS} "
         f"({NO_LABEL}=no label, 1..{MAX_LABEL}=named labels, {RESERVED_LABEL}=reserved)"

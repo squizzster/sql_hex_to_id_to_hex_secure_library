@@ -37,8 +37,8 @@ DEMO_LABELS = {
 }
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 TEST_CONF_DIR = PROJECT_ROOT / "conf"
-os.environ["SQL_ID_LIBRARY_PASSWORD_HEX"] = TEST_PASSWORD
-os.environ["SQL_ID_LIBRARY_DOMAIN_SALT_HEX"] = TEST_DOMAIN_SALT_HEX
+os.environ["SQL_ID_LIBRARY_PASSWORD_HEX_v1"] = TEST_PASSWORD
+os.environ["SQL_ID_LIBRARY_DOMAIN_SALT_HEX_v1"] = TEST_DOMAIN_SALT_HEX
 
 import sql_id_library as sid  # noqa: E402  - env default is set before import
 
@@ -70,7 +70,7 @@ def write_test_pepper(path: Path, value: str = TEST_PEPPER_HEX, mode: int = 0o40
 
 @contextmanager
 def patched_password(value: str | None):
-    """Temporarily patch SQL_ID_LIBRARY_PASSWORD_HEX for tests."""
+    """Temporarily patch the v1 SQL ID password for tests."""
     with patched_env_var(sid.ENV_PASSWORD_NAME, value):
         yield
 
@@ -91,7 +91,7 @@ class TestSqlIdLibrary(unittest.TestCase):
         self._temp_dir = tempfile.TemporaryDirectory(prefix="sql_id_library_test_")
         self.addCleanup(self._temp_dir.cleanup)
         self.test_dir = Path(self._temp_dir.name)
-        self.test_pepper_path = self.test_dir / "test_sql_id_pepper.key"
+        self.test_pepper_path = self.test_dir / "test_sql_id_pepper_v1.key"
 
         os.environ[sid.ENV_PASSWORD_NAME] = TEST_PASSWORD
         os.environ[sid.ENV_DOMAIN_SALT_NAME] = TEST_DOMAIN_SALT_HEX
@@ -126,9 +126,17 @@ class TestSqlIdLibrary(unittest.TestCase):
         self.assertEqual(sid.TOTAL_BITS, 128)
         self.assertEqual(sid.HEX_CHARS, 32)
         self.assertEqual(sid.SUPPORTED_HEX_LENGTHS, (32,))
-        self.assertEqual(sid.ENV_PASSWORD_NAME, "SQL_ID_LIBRARY_PASSWORD_HEX")
-        self.assertEqual(sid.ENV_DOMAIN_SALT_NAME, "SQL_ID_LIBRARY_DOMAIN_SALT_HEX")
-        self.assertEqual(sid.ISSUE_VERSION, 2)
+        self.assertEqual(sid.ENV_PASSWORD_BASE_NAME, "SQL_ID_LIBRARY_PASSWORD_HEX")
+        self.assertEqual(sid.ENV_DOMAIN_SALT_BASE_NAME, "SQL_ID_LIBRARY_DOMAIN_SALT_HEX")
+        self.assertEqual(sid.ENV_PASSWORD_NAME, "SQL_ID_LIBRARY_PASSWORD_HEX_v1")
+        self.assertEqual(sid.ENV_DOMAIN_SALT_NAME, "SQL_ID_LIBRARY_DOMAIN_SALT_HEX_v1")
+        self.assertEqual(sid.MIN_VERSION, 1)
+        self.assertEqual(sid.MAX_VERSION, 6)
+        self.assertEqual(sid.ISSUE_VERSION, 1)
+        self.assertEqual(sid.ACTIVE_DECODE_VERSIONS, frozenset(range(1, 7)))
+        self.assertEqual(sid.DEFAULT_ALLOWED_VERSIONS, frozenset(range(1, 7)))
+        self.assertEqual(sid.allowed_versions(), (1, 2, 3, 4, 5, 6))
+        self.assertEqual(sid.configured_issue_version(), 1)
         self.assertEqual(sid.RESERVED_VERSION, 7)
         self.assertEqual(sid.NO_LABEL, 0)
         self.assertEqual(sid.MAX_LABEL, 30)
@@ -150,7 +158,7 @@ class TestSqlIdLibrary(unittest.TestCase):
         self.assertEqual(sid.MAX_PASSWORD_HEX_CHARS, 512)
         self.assertEqual(sid.MIN_PASSWORD_BYTES, 32)
         self.assertEqual(sid.MAX_PASSWORD_BYTES, 256)
-        self.assertEqual(sid.DEFAULT_PEPPER_FILE_LOCATION, "~/.sql_hex_id_pepper_file.key")
+        self.assertEqual(sid.DEFAULT_PEPPER_FILE_LOCATION, "~/.sql_hex_id_pepper_file_v1.key")
         self.assertEqual(sid.MIN_PEPPER_HEX_CHARS, 64)
         self.assertEqual(sid.MAX_PEPPER_HEX_CHARS, 512)
         self.assertEqual(sid.MIN_PEPPER_BYTES, 32)
@@ -228,7 +236,7 @@ class TestSqlIdLibrary(unittest.TestCase):
             self.assertEqual(result.error_code, "bad_config")
             self.assertIn(f"{sid.ENV_DOMAIN_SALT_NAME} bit balance", result.error or "")
 
-        pepper_path = self.test_dir / "low_bit_balance_sql_id_pepper.key"
+        pepper_path = self.test_dir / "low_bit_balance_sql_id_pepper_v1.key"
         write_test_pepper(pepper_path, LOW_BIT_BALANCE_HEX)
         try:
             sid.configure_sql_id({"pepper_file_location": str(pepper_path)})
@@ -301,10 +309,10 @@ class TestSqlIdLibrary(unittest.TestCase):
         self.assertEqual(TEST_PEPPER_HEX, "0123456789abcdef" * 4)
 
         plain_vectors = [
-            (1, "dc0f8c4efe8122af4b2c7a1d2815d69e"),
-            (sid.SMALL_RANGE_MAX_ID, "d7611c882cbf04065b6228ad395c696a"),
-            (sid.BIGINT_RANGE_MIN_ID, "7065a0944fe59e71aeabedc910037d5b"),
-            (sid.MAX_ID, "2698eb4949801cb38eacdeb61db54bd8"),
+            (1, "ffe221b73c4434daa0799d97c47f8dcc"),
+            (sid.SMALL_RANGE_MAX_ID, "700dd08b0c32476c5bcb8315504e5b68"),
+            (sid.BIGINT_RANGE_MIN_ID, "d1fc0dd1b57e795242650b48ad128818"),
+            (sid.MAX_ID, "dcff9210506f5e0a266eaa1a7183bd86"),
         ]
         for id_value, expected_hex in plain_vectors:
             with self.subTest(id_value=id_value):
@@ -317,9 +325,9 @@ class TestSqlIdLibrary(unittest.TestCase):
 
         with patched_labels(DEMO_LABELS):
             labeled_vectors = [
-                ("dry_run", 1, "9bd8aa8c026690ebe365d2b2081ed7c0"),
-                ("plan", 1, "e61ac253ffaabe7bb88f9aaf01280ee0"),
-                ("repair", 1, "b558b13754e9f1733d724ca3d04dfe72"),
+                ("dry_run", 1, "8b99f28a77cac023c1f15a23db28e94a"),
+                ("plan", 1, "683f6eefac70e5e8633d3c9ecebcf412"),
+                ("repair", 1, "031a6b14ff600bf3cf463f00e9658788"),
             ]
             for label, id_value, expected_hex in labeled_vectors:
                 with self.subTest(label=label, id_value=id_value):
@@ -333,7 +341,7 @@ class TestSqlIdLibrary(unittest.TestCase):
                     self.assertEqual(result.label_id, DEMO_LABELS[label])
                     self.assertEqual(result.label, label)
 
-            repair_hex = "b558b13754e9f1733d724ca3d04dfe72"
+            repair_hex = "031a6b14ff600bf3cf463f00e9658788"
             self.assertIsNone(sid.hex_to_id(repair_hex))
             self.assertIsNone(sid.hex_to_id_label(repair_hex, "plan"))
             self.assertEqual(sid.hex_to_id_label(repair_hex, "repair"), 1)
@@ -433,8 +441,43 @@ class TestSqlIdLibrary(unittest.TestCase):
                     sid.configure_sql_id({"labels": labels})  # type: ignore[dict-item]
                 self.assertEqual(sid.available_labels(), {"users": 1, "plans": 2})
 
+    def test_allowed_versions_config_validation(self) -> None:
+        sid.configure_sql_id({"allowed_versions": [1, 3, 6]})
+        self.assertEqual(sid.allowed_versions(), (1, 3, 6))
+
+        invalid_allowed_versions: list[object] = [
+            None,
+            "1",
+            [],
+            [0],
+            [7],
+            [1, 1],
+            [True],
+            ["1"],
+            [1.0],
+        ]
+        for versions in invalid_allowed_versions:
+            with self.subTest(versions=repr(versions)):
+                with self.assertRaises(ValueError):
+                    sid.configure_sql_id({"allowed_versions": versions})  # type: ignore[dict-item]
+                self.assertEqual(sid.allowed_versions(), (1, 3, 6))
+
+    def test_pepper_file_location_must_be_main_v1_filename(self) -> None:
+        original_location = sid.configured_pepper_file_location()
+        invalid_paths = [
+            self.test_dir / "sql_id_pepper.key",
+            self.test_dir / "sql_id_pepper_v1",
+            self.test_dir / "sql_id_pepper_v2.key",
+            self.test_dir / "sql_id_pepper_v7.key",
+        ]
+        for path in invalid_paths:
+            with self.subTest(path=path.name):
+                with self.assertRaises(ValueError):
+                    sid.configure_sql_id({"pepper_file_location": str(path)})
+                self.assertEqual(sid.configured_pepper_file_location(), original_location)
+
     def test_configure_sql_id_accepts_pepper_path_labels_or_both(self) -> None:
-        other_pepper_path = self.test_dir / "other_test_sql_id_pepper.key"
+        other_pepper_path = self.test_dir / "other_test_sql_id_pepper_v1.key"
         write_test_pepper(other_pepper_path, OTHER_TEST_PEPPER_HEX)
         try:
             sid.configure_sql_id({"labels": {"users": 1}})
@@ -454,6 +497,7 @@ class TestSqlIdLibrary(unittest.TestCase):
 
     def test_load_sql_id_config_from_json_file(self) -> None:
         sid.load_sql_id_config_from_file(TEST_CONF_DIR / "test_sql_id_config.json")
+        self.assertEqual(sid.allowed_versions(), (1, 2, 3, 4, 5, 6))
         self.assertEqual(
             sid.available_labels(),
             {
@@ -475,6 +519,7 @@ class TestSqlIdLibrary(unittest.TestCase):
             self.skipTest("PyYAML is not installed")
 
         sid.load_sql_id_config_from_file(TEST_CONF_DIR / "test_sql_id_config.yaml")
+        self.assertEqual(sid.allowed_versions(), (1, 2, 3, 4, 5, 6))
         self.assertEqual(
             sid.available_labels(),
             {
@@ -523,7 +568,7 @@ class TestSqlIdLibrary(unittest.TestCase):
 
     def test_load_sql_id_config_from_file_can_set_pepper_location(self) -> None:
         json_path = self.test_dir / "pepper_path_sql_id_config.json"
-        other_pepper_path = self.test_dir / "config_sql_id_pepper.key"
+        other_pepper_path = self.test_dir / "config_sql_id_pepper_v1.key"
         write_test_pepper(other_pepper_path, OTHER_TEST_PEPPER_HEX)
         json_path.write_text(
             '{"pepper_file_location": "' + str(other_pepper_path) + '", "labels": {"dry_run": 1}}\n',
@@ -750,7 +795,7 @@ class TestSqlIdLibrary(unittest.TestCase):
             self.assertEqual(result.error_code, "bad_config")
             self.assertIn(sid.ENV_DOMAIN_SALT_NAME, result.error or "")
 
-            missing_pepper_path = self.test_dir / "missing_for_salt_order.key"
+            missing_pepper_path = self.test_dir / "missing_for_salt_order_v1.key"
             missing_pepper_path.unlink(missing_ok=True)
             sid.configure_sql_id({"pepper_file_location": str(missing_pepper_path)})
             result = sid.validate_hex("0" * sid.HEX_CHARS)
@@ -791,16 +836,16 @@ class TestSqlIdLibrary(unittest.TestCase):
 
     def test_pepper_file_config_errors_are_specific(self) -> None:
         cases = [
-            ("missing_sql_id_pepper.key", None, None, "missing_pepper_file"),
-            ("short_sql_id_pepper.key", "0123456789abcdef", 0o400, "pepper_too_short"),
-            ("long_sql_id_pepper.key", "01" * (sid.MAX_PEPPER_BYTES + 1), 0o400, "pepper_too_long"),
-            ("odd_sql_id_pepper.key", ("01" * 32) + "0", 0o400, "invalid_pepper_hex"),
-            ("nonhex_sql_id_pepper.key", "g" * 64, 0o400, "invalid_pepper_hex"),
-            ("leading_space_sql_id_pepper.key", " " + TEST_PEPPER_HEX, 0o400, "invalid_pepper_hex"),
-            ("trailing_space_sql_id_pepper.key", TEST_PEPPER_HEX + " ", 0o400, "invalid_pepper_hex"),
-            ("trailing_tab_sql_id_pepper.key", TEST_PEPPER_HEX + "\t", 0o400, "invalid_pepper_hex"),
-            ("low_diversity_sql_id_pepper.key", "00" * 32, 0o400, "low_diversity_pepper"),
-            ("world_readable_sql_id_pepper.key", TEST_PEPPER_HEX, 0o644, "bad_pepper_permissions"),
+            ("missing_sql_id_pepper_v1.key", None, None, "missing_pepper_file"),
+            ("short_sql_id_pepper_v1.key", "0123456789abcdef", 0o400, "pepper_too_short"),
+            ("long_sql_id_pepper_v1.key", "01" * (sid.MAX_PEPPER_BYTES + 1), 0o400, "pepper_too_long"),
+            ("odd_sql_id_pepper_v1.key", ("01" * 32) + "0", 0o400, "invalid_pepper_hex"),
+            ("nonhex_sql_id_pepper_v1.key", "g" * 64, 0o400, "invalid_pepper_hex"),
+            ("leading_space_sql_id_pepper_v1.key", " " + TEST_PEPPER_HEX, 0o400, "invalid_pepper_hex"),
+            ("trailing_space_sql_id_pepper_v1.key", TEST_PEPPER_HEX + " ", 0o400, "invalid_pepper_hex"),
+            ("trailing_tab_sql_id_pepper_v1.key", TEST_PEPPER_HEX + "\t", 0o400, "invalid_pepper_hex"),
+            ("low_diversity_sql_id_pepper_v1.key", "00" * 32, 0o400, "low_diversity_pepper"),
+            ("world_readable_sql_id_pepper_v1.key", TEST_PEPPER_HEX, 0o644, "bad_pepper_permissions"),
         ]
 
         for filename, contents, mode, code in cases:
@@ -819,7 +864,7 @@ class TestSqlIdLibrary(unittest.TestCase):
                 sid.configure_sql_id({"pepper_file_location": str(self.test_pepper_path)})
 
     def test_pepper_file_accepts_exact_max_hex_and_rejects_larger_file(self) -> None:
-        pepper_path = self.test_dir / "max_size_sql_id_pepper.key"
+        pepper_path = self.test_dir / "max_size_sql_id_pepper_v1.key"
         max_pepper_hex = "00112233445566778899aabbccddeeff" * 16
         try:
             write_test_pepper(pepper_path, max_pepper_hex, newline=False)
@@ -842,8 +887,8 @@ class TestSqlIdLibrary(unittest.TestCase):
         if os.name != "posix" or not hasattr(os, "symlink"):
             self.skipTest("POSIX symlink behavior only")
 
-        target_path = self.test_dir / "target_sql_id_pepper.key"
-        symlink_path = self.test_dir / "symlink_sql_id_pepper.key"
+        target_path = self.test_dir / "target_sql_id_pepper_v1.key"
+        symlink_path = self.test_dir / "symlink_sql_id_pepper_v1.key"
         write_test_pepper(target_path, TEST_PEPPER_HEX)
         symlink_path.unlink(missing_ok=True)
         symlink_path.symlink_to(target_path)
@@ -862,7 +907,7 @@ class TestSqlIdLibrary(unittest.TestCase):
         if os.name != "posix" or not hasattr(os, "symlink"):
             self.skipTest("POSIX symlink behavior only")
 
-        loop_path = self.test_dir / "loop_sql_id_pepper.key"
+        loop_path = self.test_dir / "loop_sql_id_pepper_v1.key"
         loop_path.unlink(missing_ok=True)
         loop_path.symlink_to(loop_path)
         try:
@@ -917,7 +962,7 @@ class TestSqlIdLibrary(unittest.TestCase):
                     self.assertFalse(sid.inspect_hex(encoded).ok)
 
     def test_different_pepper_cannot_decode_existing_public_id(self) -> None:
-        other_pepper_path = self.test_dir / "other_decode_sql_id_pepper.key"
+        other_pepper_path = self.test_dir / "other_decode_sql_id_pepper_v1.key"
         write_test_pepper(other_pepper_path, OTHER_TEST_PEPPER_HEX)
         encoded_values = [
             self.assert_public_hex(sid.id_to_hex(123)),
@@ -1061,18 +1106,67 @@ class TestSqlIdLibrary(unittest.TestCase):
                         self.assertIsNone(sid.hex_to_id_label(tampered, label))
                     self.assertFalse(sid.inspect_hex(tampered).ok)
 
-    def test_valid_tag_for_inactive_versions_is_rejected(self) -> None:
+    def test_reserved_versions_are_rejected(self) -> None:
         round_keys, tag_key = sid._key_material()
         id_value = 1
-        for inactive_version in [0, 1, 6, sid.RESERVED_VERSION]:
-            with self.subTest(inactive_version=inactive_version):
-                plain = sid._pack_plain(inactive_version, sid.NO_LABEL, id_value, tag_key)
+        for reserved_version in [0, sid.RESERVED_VERSION]:
+            with self.subTest(reserved_version=reserved_version):
+                plain = sid._pack_plain(reserved_version, sid.NO_LABEL, id_value, tag_key)
                 encoded = f"{sid._feistel_encrypt(plain, round_keys):0{sid.HEX_CHARS}x}"
 
                 result = sid.validate_hex(encoded)
                 self.assertFalse(result.ok)
-                self.assertEqual(result.error_code, "unsupported_version")
+                self.assertEqual(result.error_code, "tag_mismatch")
                 self.assertIsNone(sid.hex_to_id(encoded))
+
+    def test_latest_version_is_always_accepted_and_older_versions_can_be_disabled(self) -> None:
+        version_1_hex = self.assert_public_hex(sid.id_to_hex(123))
+
+        os.environ["SQL_ID_LIBRARY_PASSWORD_HEX_v2"] = OTHER_TEST_PASSWORD
+        os.environ["SQL_ID_LIBRARY_DOMAIN_SALT_HEX_v2"] = OTHER_TEST_DOMAIN_SALT_HEX
+        pepper_v2_path = self.test_dir / "test_sql_id_pepper_v2.key"
+        write_test_pepper(pepper_v2_path, OTHER_TEST_PEPPER_HEX)
+        try:
+            self.assertEqual(sid.configured_issue_version(), 2)
+            version_2_hex = self.assert_public_hex(sid.id_to_hex(123))
+            self.assertNotEqual(version_1_hex, version_2_hex)
+            self.assertEqual(sid.validate_hex(version_2_hex).version, 2)
+            self.assertEqual(sid.hex_to_id(version_2_hex), 123)
+            self.assertEqual(sid.hex_to_id(version_1_hex), 123)
+
+            sid.configure_sql_id({"allowed_versions": [2]})
+            self.assertEqual(sid.configured_issue_version(), 2)
+            self.assertEqual(sid.hex_to_id(version_2_hex), 123)
+            self.assertIsNone(sid.hex_to_id(version_1_hex))
+            self.assertEqual(sid.validate_hex(version_1_hex).error_code, "unsupported_version")
+
+            sid.configure_sql_id({"allowed_versions": [1]})
+            self.assertEqual(sid.configured_issue_version(), 2)
+            self.assertEqual(sid.hex_to_id(version_2_hex), 123)
+            self.assertEqual(sid.hex_to_id(version_1_hex), 123)
+        finally:
+            os.environ.pop("SQL_ID_LIBRARY_PASSWORD_HEX_v2", None)
+            os.environ.pop("SQL_ID_LIBRARY_DOMAIN_SALT_HEX_v2", None)
+            pepper_v2_path.chmod(0o600) if pepper_v2_path.exists() else None
+            pepper_v2_path.unlink(missing_ok=True)
+            sid.configure_sql_id({"allowed_versions": sorted(sid.DEFAULT_ALLOWED_VERSIONS)})
+
+    def test_partial_higher_version_fails_closed_instead_of_falling_back(self) -> None:
+        version_1_hex = self.assert_public_hex(sid.id_to_hex(123))
+
+        os.environ["SQL_ID_LIBRARY_PASSWORD_HEX_v2"] = OTHER_TEST_PASSWORD
+        os.environ["SQL_ID_LIBRARY_DOMAIN_SALT_HEX_v2"] = OTHER_TEST_DOMAIN_SALT_HEX
+        try:
+            self.assertIsNone(sid.configured_issue_version())
+            self.assertFalse(sid.is_configured())
+            self.assertIsNone(sid.id_to_hex(123))
+
+            result = sid.validate_hex(version_1_hex)
+            self.assertFalse(result.ok)
+            self.assertEqual(result.error_code, "missing_pepper_file")
+        finally:
+            os.environ.pop("SQL_ID_LIBRARY_PASSWORD_HEX_v2", None)
+            os.environ.pop("SQL_ID_LIBRARY_DOMAIN_SALT_HEX_v2", None)
 
     def test_valid_tag_for_reserved_label_is_rejected(self) -> None:
         round_keys, tag_key = sid._key_material()

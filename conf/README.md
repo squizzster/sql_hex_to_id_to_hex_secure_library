@@ -2,11 +2,13 @@
 
 This directory contains example SQL ID config files.
 
-You can configure labels and/or a custom pepper path in application code:
+You can configure labels, accepted older versions, and/or a custom versioned
+pepper path in application code:
 
 ```python
 configure_sql_id({
-    "pepper_file_location": "~/.sql_hex_id_pepper_file.key",
+    "pepper_file_location": "~/.sql_hex_id_pepper_file_v1.key",
+    "allowed_versions": [1, 2, 3, 4, 5, 6],
     "labels": {
         "dry_run": 1,
         "plan": 2,
@@ -41,3 +43,7 @@ reload_sql_id_config_from_file("./conf/test_sql_id_config.yaml")
 
 Label IDs are permanent schema. Do not reuse a label ID for a different meaning
 after public IDs have been issued.
+
+The highest fully configured key-material version is always accepted and used
+for new IDs. `allowed_versions` controls which older configured versions remain
+accepted during decode.
