@@ -84,24 +84,33 @@ class SqlIdLibraryTests(unittest.TestCase):
         self.assertRegex(encoded, re.compile(rf"^[0-9a-f]{{{sid.HEX_CHARS}}}$"))
         return encoded
 
-    def test_fixed_layout_uses_full_64_bit_budget(self) -> None:
+    def test_fixed_layout_uses_full_128_bit_budget(self) -> None:
         layout = sid.DEFAULT_LAYOUT
 
-        self.assertEqual(sid.SCHEME_REVISION, 3)
+        self.assertEqual(sid.SCHEME_REVISION, 4)
         self.assertEqual(sid.VERSION_BITS, 3)
         self.assertEqual(sid.LABEL_BITS, 5)
-        self.assertEqual(sid.ID_BITS, 32)
-        self.assertEqual(sid.TAG_BITS, 24)
-        self.assertEqual(sid.TOTAL_BITS, 64)
-        self.assertEqual(sid.HEX_CHARS, 16)
-        self.assertEqual(sid.SUPPORTED_HEX_LENGTHS, (16,))
+        self.assertEqual(sid.RANGE_BITS, 1)
+        self.assertEqual(sid.SMALL_ID_BITS, 32)
+        self.assertEqual(sid.BIGINT_ID_BITS, 64)
+        self.assertEqual(sid.ID_BITS, 64)
+        self.assertEqual(sid.SMALL_TAG_BITS, 87)
+        self.assertEqual(sid.BIGINT_TAG_BITS, 55)
+        self.assertEqual(sid.TAG_BITS, 55)
+        self.assertEqual(sid.TOTAL_BITS, 128)
+        self.assertEqual(sid.HEX_CHARS, 32)
+        self.assertEqual(sid.SUPPORTED_HEX_LENGTHS, (32,))
         self.assertEqual(sid.ISSUE_VERSION, 2)
         self.assertEqual(sid.RESERVED_VERSION, 7)
         self.assertEqual(sid.NO_LABEL, 0)
         self.assertEqual(sid.MAX_LABEL, 30)
         self.assertEqual(sid.RESERVED_LABEL, 31)
-        self.assertEqual(sid.MAX_ID, 4_294_967_295)
-        self.assertEqual(sid.MYSQL_UNSIGNED_INT_MAX, 4_294_967_295)
+        self.assertEqual(sid.SMALL_RANGE_CLASS, 0)
+        self.assertEqual(sid.BIGINT_RANGE_CLASS, 1)
+        self.assertEqual(sid.SMALL_RANGE_MAX_ID, 4_294_967_295)
+        self.assertEqual(sid.BIGINT_RANGE_MIN_ID, 4_294_967_296)
+        self.assertEqual(sid.MAX_ID, 18_446_744_073_709_551_615)
+        self.assertEqual(sid.MYSQL_UNSIGNED_BIGINT_MAX, sid.MAX_ID)
         self.assertGreaterEqual(sid.MIN_PASSWORD_BYTES, 32)
         self.assertEqual(sid.DEFAULT_PEPPER_FILE_LOCATION, "~/.sql_hex_id_pepper_file.key")
         self.assertEqual(sid.MIN_PEPPER_HEX_CHARS, 64)
@@ -114,24 +123,46 @@ class SqlIdLibraryTests(unittest.TestCase):
         self.assertEqual(len(bytes.fromhex(sid.DOMAIN_SALT_HEX)), 32)
         self.assertTrue(sid._constants_are_sane())
 
-        self.assertEqual(layout.version_bits + layout.label_bits + layout.id_bits + layout.tag_bits, 64)
-        self.assertEqual(layout.bytes, 8)
-        self.assertEqual(layout.half_bits, 32)
-        self.assertEqual(layout.hex_chars, 16)
-        self.assertEqual(layout.max_id, (1 << 32) - 1)
-        self.assertEqual(layout.id_states, 1 << 32)
+        self.assertEqual(layout.header_bits + sid.SMALL_ID_BITS + sid.SMALL_TAG_BITS, 128)
+        self.assertEqual(layout.header_bits + sid.BIGINT_ID_BITS + sid.BIGINT_TAG_BITS, 128)
+        self.assertEqual(layout.bytes, 16)
+        self.assertEqual(layout.half_bits, 64)
+        self.assertEqual(layout.hex_chars, 32)
+        self.assertEqual(layout.max_id, (1 << 64) - 1)
+        self.assertEqual(layout.valid_id_count, sid.MAX_ID)
+        self.assertEqual(layout.id_states, 1 << 64)
         self.assertEqual(layout.version_mask, sid.RESERVED_VERSION)
         self.assertEqual(layout.label_mask, sid.RESERVED_LABEL)
-        self.assertIs(sid.layout_for_hex_length(16), sid.DEFAULT_LAYOUT)
-        self.assertIsNone(sid.layout_for_hex_length(15))
+        self.assertEqual(layout.range_mask, 1)
+        self.assertEqual(layout.range_for_id(1), sid.SMALL_RANGE_LAYOUT)
+        self.assertEqual(layout.range_for_id(sid.SMALL_RANGE_MAX_ID), sid.SMALL_RANGE_LAYOUT)
+        self.assertEqual(layout.range_for_id(sid.BIGINT_RANGE_MIN_ID), sid.BIGINT_RANGE_LAYOUT)
+        self.assertEqual(layout.range_for_id(sid.MAX_ID), sid.BIGINT_RANGE_LAYOUT)
+        self.assertIs(sid.layout_for_hex_length(32), sid.DEFAULT_LAYOUT)
+        self.assertIsNone(sid.layout_for_hex_length(16))
+        self.assertIsNone(sid.layout_for_hex_length(31))
         self.assertIsNone(sid.layout_for_hex_length(True))
 
     def test_unlabeled_public_api_round_trips_edges_and_representatives(self) -> None:
-        for value in [1, 2, 12, 999, "1", "000001", sid.MAX_ID - 1, sid.MAX_ID, str(sid.MAX_ID)]:
+        values: list[object] = [
+            1,
+            2,
+            12,
+            999,
+            "1",
+            "000001",
+            sid.SMALL_RANGE_MAX_ID - 1,
+            sid.SMALL_RANGE_MAX_ID,
+            sid.BIGINT_RANGE_MIN_ID,
+            sid.MAX_ID - 1,
+            sid.MAX_ID,
+            str(sid.MAX_ID),
+        ]
+        for value in values:
             with self.subTest(value=value):
                 expected = int(value)
                 encoded = self.assert_public_hex(sid.id_to_hex(value))
-                self.assertEqual(len(encoded), 16)
+                self.assertEqual(len(encoded), 32)
                 self.assertEqual(sid.hex_to_id(encoded), expected)
                 self.assertEqual(sid.hex_to_id(encoded.upper()), expected)
                 self.assertEqual(sid.sql_decode_id(encoded), expected)
@@ -141,10 +172,41 @@ class SqlIdLibraryTests(unittest.TestCase):
                 self.assertEqual(result.id, expected)
                 self.assertEqual(result.label_id, sid.NO_LABEL)
                 self.assertIsNone(result.label)
+                self.assertEqual(
+                    result.range_class,
+                    sid.SMALL_RANGE_CLASS if expected <= sid.SMALL_RANGE_MAX_ID else sid.BIGINT_RANGE_CLASS,
+                )
+                self.assertEqual(
+                    result.tag_bits,
+                    sid.SMALL_TAG_BITS if expected <= sid.SMALL_RANGE_MAX_ID else sid.BIGINT_TAG_BITS,
+                )
                 self.assertEqual(result.version, sid.ISSUE_VERSION)
                 self.assertIsNone(result.error)
                 self.assertIsNone(result.error_code)
                 self.assertEqual(sid.hex_to_parts(encoded), (sid.NO_LABEL, None, sid.ISSUE_VERSION, expected))
+
+    def test_range_classes_are_canonical_and_use_expected_tag_space(self) -> None:
+        round_keys, _tag_key = sid._key_material()
+        cases = [
+            (1, sid.SMALL_RANGE_CLASS, sid.SMALL_TAG_BITS),
+            (sid.SMALL_RANGE_MAX_ID, sid.SMALL_RANGE_CLASS, sid.SMALL_TAG_BITS),
+            (sid.BIGINT_RANGE_MIN_ID, sid.BIGINT_RANGE_CLASS, sid.BIGINT_TAG_BITS),
+            (sid.MAX_ID, sid.BIGINT_RANGE_CLASS, sid.BIGINT_TAG_BITS),
+        ]
+
+        for id_value, expected_range_class, expected_tag_bits in cases:
+            with self.subTest(id_value=id_value):
+                encoded = self.assert_public_hex(sid.id_to_hex(id_value))
+                plain = sid._feistel_decrypt(int(encoded, 16), round_keys)
+                version, label_id, range_class, unpacked_id, supplied_tag = sid._unpack_plain(plain)
+                range_layout = sid.DEFAULT_LAYOUT.range_for_class(range_class)
+
+                self.assertEqual(version, sid.ISSUE_VERSION)
+                self.assertEqual(label_id, sid.NO_LABEL)
+                self.assertEqual(range_class, expected_range_class)
+                self.assertEqual(unpacked_id, id_value)
+                self.assertLessEqual(supplied_tag, range_layout.tag_mask)
+                self.assertEqual(range_layout.tag_bits, expected_tag_bits)
 
     def test_labeled_public_api_round_trips_with_int_and_configured_names(self) -> None:
         with patched_labels({"users": 1, "plans": 2, "repair": 30}):
@@ -489,12 +551,12 @@ class SqlIdLibraryTests(unittest.TestCase):
         with patched_password("short"):
             self.assertFalse(sid.is_configured())
             self.assertIsNone(sid.id_to_hex(1))
-            self.assertEqual(sid.validate_hex("0" * 16).error_code, "bad_config")
+            self.assertEqual(sid.validate_hex("0" * sid.HEX_CHARS).error_code, "bad_config")
 
         with patched_password("a" * sid.MIN_PASSWORD_BYTES):
             self.assertFalse(sid.is_configured())
             self.assertIsNone(sid.id_to_hex(1))
-            self.assertEqual(sid.validate_hex("0" * 16).error_code, "bad_config")
+            self.assertEqual(sid.validate_hex("0" * sid.HEX_CHARS).error_code, "bad_config")
 
         with patched_password("0123456789abcdef" * 2):
             self.assertTrue(sid.is_configured())
@@ -664,14 +726,15 @@ class SqlIdLibraryTests(unittest.TestCase):
             (False, "not_string"),
             (0, "not_string"),
             (123, "not_string"),
-            (b"0000000000000000", "not_string"),
+            (b"00000000000000000000000000000000", "not_string"),
             ("", "unsupported_length"),
             ("0", "unsupported_length"),
-            ("0" * 15, "unsupported_length"),
-            ("0" * 17, "unsupported_length"),
-            ("g" * 16, "invalid_hex"),
-            ("z" * 16, "invalid_hex"),
-            (" " * 16, "invalid_hex"),
+            ("0" * 16, "unsupported_length"),
+            ("0" * 31, "unsupported_length"),
+            ("0" * 33, "unsupported_length"),
+            ("g" * sid.HEX_CHARS, "invalid_hex"),
+            ("z" * sid.HEX_CHARS, "invalid_hex"),
+            (" " * sid.HEX_CHARS, "invalid_hex"),
             ([], "not_string"),
             ({}, "not_string"),
             (object(), "not_string"),
@@ -697,7 +760,7 @@ class SqlIdLibraryTests(unittest.TestCase):
                 raise AssertionError("overlong unsupported hex should not be lowercased")
 
         with mock.patch.object(sid, "_HEX_CHARS_RE", ExplodingRegex()):
-            short_result = sid.validate_hex("g" * 15)
+            short_result = sid.validate_hex("g" * 31)
             self.assertFalse(short_result.ok)
             self.assertEqual(short_result.error_code, "unsupported_length")
 
@@ -734,10 +797,10 @@ class SqlIdLibraryTests(unittest.TestCase):
 
     def test_valid_tag_for_inactive_versions_is_rejected(self) -> None:
         round_keys, tag_key = sid._key_material()
-        id_index = 0
+        id_value = 1
         for inactive_version in [0, 1, 6, sid.RESERVED_VERSION]:
             with self.subTest(inactive_version=inactive_version):
-                plain = sid._pack_plain(inactive_version, sid.NO_LABEL, id_index, tag_key)
+                plain = sid._pack_plain(inactive_version, sid.NO_LABEL, id_value, tag_key)
                 encoded = f"{sid._feistel_encrypt(plain, round_keys):0{sid.HEX_CHARS}x}"
 
                 result = sid.validate_hex(encoded)
@@ -747,7 +810,7 @@ class SqlIdLibraryTests(unittest.TestCase):
 
     def test_valid_tag_for_reserved_label_is_rejected(self) -> None:
         round_keys, tag_key = sid._key_material()
-        plain = sid._pack_plain(sid.ISSUE_VERSION, sid.RESERVED_LABEL, 0, tag_key)
+        plain = sid._pack_plain(sid.ISSUE_VERSION, sid.RESERVED_LABEL, 1, tag_key)
         encoded = f"{sid._feistel_encrypt(plain, round_keys):0{sid.HEX_CHARS}x}"
 
         result = sid.inspect_hex(encoded)
@@ -756,22 +819,23 @@ class SqlIdLibraryTests(unittest.TestCase):
         self.assertIsNone(sid.hex_to_id(encoded))
         self.assertIsNone(sid.hex_to_id_label(encoded, sid.MAX_LABEL))
 
-    def test_valid_tag_for_unused_all_ones_id_slot_is_rejected(self) -> None:
+    def test_valid_tag_for_noncanonical_range_ids_is_rejected(self) -> None:
         round_keys, tag_key = sid._key_material()
-        first_unused_id_index = sid.DEFAULT_LAYOUT.max_id
-        tag = sid._tag(sid.ISSUE_VERSION, sid.NO_LABEL, first_unused_id_index, tag_key)
-        plain = (
-            (sid.ISSUE_VERSION << (sid.LABEL_BITS + sid.ID_BITS + sid.TAG_BITS))
-            | (sid.NO_LABEL << (sid.ID_BITS + sid.TAG_BITS))
-            | (first_unused_id_index << sid.TAG_BITS)
-            | tag
-        )
-        encoded = f"{sid._feistel_encrypt(plain, round_keys):0{sid.HEX_CHARS}x}"
+        cases = [
+            (sid.SMALL_RANGE_CLASS, 0),
+            (sid.BIGINT_RANGE_CLASS, sid.SMALL_RANGE_MAX_ID),
+        ]
 
-        result = sid.validate_hex(encoded)
-        self.assertFalse(result.ok)
-        self.assertEqual(result.error_code, "id_out_of_range")
-        self.assertIsNone(sid.hex_to_id(encoded))
+        for range_class, id_value in cases:
+            with self.subTest(range_class=range_class, id_value=id_value):
+                tag = sid._tag(sid.ISSUE_VERSION, sid.NO_LABEL, range_class, id_value, tag_key)
+                plain = sid._pack_plain_fields(sid.ISSUE_VERSION, sid.NO_LABEL, range_class, id_value, tag)
+                encoded = f"{sid._feistel_encrypt(plain, round_keys):0{sid.HEX_CHARS}x}"
+
+                result = sid.validate_hex(encoded)
+                self.assertFalse(result.ok)
+                self.assertEqual(result.error_code, "id_out_of_range")
+                self.assertIsNone(sid.hex_to_id(encoded))
 
     def test_tag_mismatch_is_rejected(self) -> None:
         for encoded, validator in [
@@ -794,18 +858,20 @@ class SqlIdLibraryTests(unittest.TestCase):
     def test_private_pack_unpack_round_trip(self) -> None:
         _round_keys, tag_key = sid._key_material()
         for label in [0, 1, 30]:
-            for id_value in [1, 123, sid.MAX_ID]:
+            for id_value in [1, 123, sid.SMALL_RANGE_MAX_ID, sid.BIGINT_RANGE_MIN_ID, sid.MAX_ID]:
                 with self.subTest(label=label, id_value=id_value):
-                    id_index = id_value - 1
-                    plain = sid._pack_plain(sid.ISSUE_VERSION, label, id_index, tag_key)
-                    version, unpacked_label, unpacked_index, supplied_tag = sid._unpack_plain(plain)
+                    expected_range = sid.DEFAULT_LAYOUT.range_for_id(id_value)
+                    plain = sid._pack_plain(sid.ISSUE_VERSION, label, id_value, tag_key)
+                    version, unpacked_label, range_class, unpacked_id, supplied_tag = sid._unpack_plain(plain)
                     self.assertEqual(version, sid.ISSUE_VERSION)
                     self.assertEqual(unpacked_label, label)
-                    self.assertEqual(unpacked_index, id_index)
+                    self.assertEqual(range_class, expected_range.range_class)
+                    self.assertEqual(unpacked_id, id_value)
                     self.assertTrue(
                         sid._tags_equal(
                             supplied_tag,
-                            sid._tag(sid.ISSUE_VERSION, label, id_index, tag_key),
+                            sid._tag(sid.ISSUE_VERSION, label, range_class, id_value, tag_key),
+                            expected_range,
                         )
                     )
 
@@ -820,15 +886,21 @@ class SqlIdLibraryTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             sid._pack_plain(sid.ISSUE_VERSION, 32, 0, tag_key)
         with self.assertRaises(ValueError):
-            sid._pack_plain(sid.ISSUE_VERSION, 0, -1, tag_key)
+            sid._pack_plain(sid.ISSUE_VERSION, 0, 0, tag_key)
         with self.assertRaises(ValueError):
-            sid._pack_plain(sid.ISSUE_VERSION, 0, sid.DEFAULT_LAYOUT.max_id, tag_key)
+            sid._pack_plain(sid.ISSUE_VERSION, 0, sid.MAX_ID + 1, tag_key)
         with self.assertRaises(ValueError):
-            sid._tag(8, 0, 0, tag_key)
+            sid._pack_plain(sid.ISSUE_VERSION, 0, sid.SMALL_RANGE_MAX_ID, tag_key, range_class=sid.BIGINT_RANGE_CLASS)
         with self.assertRaises(ValueError):
-            sid._tag(sid.ISSUE_VERSION, 32, 0, tag_key)
+            sid._pack_plain_fields(sid.ISSUE_VERSION, 0, sid.SMALL_RANGE_CLASS, 1, 1 << sid.SMALL_TAG_BITS)
         with self.assertRaises(ValueError):
-            sid._tag(sid.ISSUE_VERSION, 0, 1 << sid.ID_BITS, tag_key)
+            sid._tag(8, 0, sid.SMALL_RANGE_CLASS, 1, tag_key)
+        with self.assertRaises(ValueError):
+            sid._tag(sid.ISSUE_VERSION, 32, sid.SMALL_RANGE_CLASS, 1, tag_key)
+        with self.assertRaises(ValueError):
+            sid._tag(sid.ISSUE_VERSION, 0, 2, 1, tag_key)
+        with self.assertRaises(ValueError):
+            sid._tag(sid.ISSUE_VERSION, 0, sid.BIGINT_RANGE_CLASS, 1 << sid.ID_BITS, tag_key)
         with self.assertRaises(ValueError):
             sid._feistel_encrypt(-1, round_keys)
         with self.assertRaises(ValueError):
@@ -843,9 +915,9 @@ class SqlIdLibraryTests(unittest.TestCase):
             1,
             (1 << sid.DEFAULT_LAYOUT.half_bits) - 1,
             1 << sid.DEFAULT_LAYOUT.half_bits,
-            sid._pack_plain(sid.ISSUE_VERSION, sid.NO_LABEL, 0, tag_key),
-            sid._pack_plain(sid.ISSUE_VERSION, 1, 0, tag_key),
-            sid._pack_plain(sid.ISSUE_VERSION, 30, sid.DEFAULT_LAYOUT.max_id - 1, tag_key),
+            sid._pack_plain(sid.ISSUE_VERSION, sid.NO_LABEL, 1, tag_key),
+            sid._pack_plain(sid.ISSUE_VERSION, 1, sid.SMALL_RANGE_MAX_ID, tag_key),
+            sid._pack_plain(sid.ISSUE_VERSION, 30, sid.MAX_ID, tag_key),
             (1 << sid.TOTAL_BITS) - 1,
         ]
 
@@ -878,24 +950,24 @@ class SqlIdLibraryTests(unittest.TestCase):
         guesses_per_year = 10 * 2 * 24 * 365
         self.assertEqual(guesses_per_year, 175_200)
 
-        strict_expected_years = (1 << 32) / guesses_per_year
-        any_label_years = ((1 << 32) / (sid.MAX_LABEL + 1)) / guesses_per_year
-        self.assertAlmostEqual(strict_expected_years, 24_515, delta=1)
-        self.assertAlmostEqual(any_label_years, 791, delta=1)
+        strict_expected_years = (1 << 64) / guesses_per_year
+        any_label_years = ((1 << 64) / (sid.MAX_LABEL + 1)) / guesses_per_year
+        self.assertAlmostEqual(strict_expected_years, 105_289_635_123_913, delta=1)
+        self.assertAlmostEqual(any_label_years, 3_396_439_842_707, delta=1)
 
-        strict_probability = sid.DEFAULT_LAYOUT.max_id / (1 << sid.TOTAL_BITS)
-        any_label_probability = ((sid.MAX_LABEL + 1) * sid.DEFAULT_LAYOUT.max_id) / (1 << sid.TOTAL_BITS)
+        strict_probability = sid.DEFAULT_LAYOUT.valid_id_count / (1 << sid.TOTAL_BITS)
+        any_label_probability = ((sid.MAX_LABEL + 1) * sid.DEFAULT_LAYOUT.valid_id_count) / (1 << sid.TOTAL_BITS)
 
         self.assertEqual(sid.DEFAULT_LAYOUT.random_valid_probability_for_expected_label, strict_probability)
         self.assertEqual(sid.DEFAULT_LAYOUT.random_valid_probability_for_any_label, any_label_probability)
-        self.assertLess(sid.DEFAULT_LAYOUT.max_id * (1 << 32), 1 << sid.TOTAL_BITS)
+        self.assertLess(sid.DEFAULT_LAYOUT.valid_id_count * (1 << 64), 1 << sid.TOTAL_BITS)
         self.assertGreater(
-            sid.DEFAULT_LAYOUT.max_id * 100 * (1 << 32),
+            sid.DEFAULT_LAYOUT.valid_id_count * 100 * (1 << 64),
             99 * (1 << sid.TOTAL_BITS),
         )
-        self.assertLess((sid.MAX_LABEL + 1) * sid.DEFAULT_LAYOUT.max_id, 1 << 37)
+        self.assertLess((sid.MAX_LABEL + 1) * sid.DEFAULT_LAYOUT.valid_id_count, 1 << 69)
 
-        self.assertIn("24_515 years", sid.__doc__ or "")
+        self.assertIn("105_289_635_123_913 years", sid.__doc__ or "")
         self.assertIn("175_200 guesses", sid.__doc__ or "")
         self.assertIn("inspect_hex()", sid.__doc__ or "")
 

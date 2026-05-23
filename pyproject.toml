@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "sql-id-library"
 version = "0.2.0"
-description = "Typed 16-character public ID encoder/decoder for SQL integer keys"
+description = "Typed 32-character public ID encoder/decoder for SQL BIGINT keys"
 readme = "README.md"
 requires-python = ">=3.11"
 authors = [{name = "XCTX"}]

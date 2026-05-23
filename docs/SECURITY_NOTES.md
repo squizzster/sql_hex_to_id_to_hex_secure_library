@@ -2,33 +2,44 @@
 
 ## What This Library Does
 
-This library maps a positive SQL integer ID to a public hex handle and back
-again:
+This library maps a positive SQL BIGINT integer ID to a public hex handle and
+back again:
 
 ```text
-SQL integer + label -> layout pack with keyed tag -> secret-keyed Feistel permutation -> lowercase hex
+SQL BIGINT + label -> layout pack with keyed tag -> secret-keyed Feistel permutation -> lowercase hex
 ```
 
-The public handle is always 64 bits / 16 hex characters.
+The public handle is always 128 bits / 32 hex characters.
 
 The plaintext packed value is:
 
 ```text
-[ version ][ label ][ zero-based SQL id index ][ keyed validation tag ]
+[ version ][ label ][ canonical range ][ SQL id ][ keyed validation tag ]
 ```
 
 It hides sequential IDs and rejects almost all random or tampered strings. It is
 not an authorization layer and not a bearer-token system.
 
-## Fixed 64-Bit Layout
+## Fixed 128-Bit Layout
 
-| Field   | Bits | Values                                      |
-| ------- | ---: | ------------------------------------------- |
+| Field   | Bits | Values |
+| ------- | ---: | ------ |
 | Version |    3 | `0..7`; issues `2`; `1`, `3..6` inactive/future; `0`, `7` reserved |
 | Label   |    5 | `0` none, `1..30` named labels, `31` reserved |
-| SQL ID  |   32 | public SQL IDs `1..4,294,967,295`           |
-| Tag     |   24 | keyed validation tag                        |
-| Total   |   64 | 16 hex characters                           |
+| Range   |    1 | `0` for 32-bit ID field, `1` for 64-bit ID field |
+| SQL ID  | 32/64 | public SQL IDs `1..18,446,744,073,709,551,615` |
+| Tag     | 87/55 | keyed validation tag                      |
+| Total   |  128 | 32 hex characters                          |
+
+Canonical range classes:
+
+| Range | SQL IDs | ID Bits | Tag Bits |
+| ----: | ------- | ------: | -------: |
+| `0` | `1..4,294,967,295` | 32 | 87 |
+| `1` | `4,294,967,296..18,446,744,073,709,551,615` | 64 | 55 |
+
+Every positive BIGINT UNSIGNED value has exactly one public encoding. IDs that
+fit inside 32 bits use the spare envelope space as additional keyed tag bits.
 
 Label `0` belongs only to the unlabeled API:
 
@@ -63,12 +74,12 @@ users ID     -> hex_to_id(...)                -> None
 users ID     -> hex_to_id_label(..., "plans") -> None
 ```
 
-The keyed tag includes the label bits, so a public ID for one label cannot be
-retagged or reinterpreted as another label without the secret.
+The keyed tag includes the label and range bits, so a public ID for one label or
+range cannot be retagged or reinterpreted without the secret.
 
 ## Secret and Domain Separation
 
-The v3 key schedule combines three independent inputs:
+The v4 key schedule combines three independent inputs:
 
 - `DOMAIN_SALT_HEX` near the top of `sql_id_library.py`
 - `XCTX_ID_PASSWORD` from the process environment
@@ -118,8 +129,8 @@ The HMAC key schedule includes the layout identity:
 scheme revision
 version bits
 label bits
-id bits
-tag bits
+range bits
+range classes, ID bits, tag bits, and canonical ID bounds
 total bits
 hex chars
 issue version
@@ -133,7 +144,8 @@ The tag HMAC includes:
 scheme/layout domain
 version
 label id
-zero-based SQL id index
+range class
+SQL id
 ```
 
 ## Random Guessing Profile
@@ -141,15 +153,15 @@ zero-based SQL id index
 For strict exact-label decoding:
 
 ```text
-valid public IDs = 2^32 - 1
-public space     = 2^64
-random-valid p   = (2^32 - 1) / 2^64
+valid public IDs = 2^64 - 1
+public space     = 2^128
+random-valid p   = (2^64 - 1) / 2^128
 ```
 
 So the probability is just under:
 
 ```text
-2^-32
+2^-64
 ```
 
 This applies to both:
@@ -198,13 +210,13 @@ This caps guesses to:
 Strict expected-label expected time to hit any decoder-valid public ID:
 
 ```text
-2^32 / 175,200 ~= 24,515 years/bucket
+2^64 / 175,200 ~= 105,289,635,123,913 years/bucket
 ```
 
 If the attacker must hit a real row, use:
 
 ```text
-expected guesses ~= 2^64 / live_row_count
+expected guesses ~= 2^128 / live_row_count
 ```
 
 for one exact expected label, then still apply normal authorization.
@@ -252,5 +264,7 @@ For bearer-token uses, generate independent random tokens of at least 128 bits.
 - Duplicate JSON/YAML keys, duplicate normalized names, duplicate IDs, boolean label IDs, and YAML boolean keys are rejected.
 - Missing, unreadable, malformed, low-diversity, overlong, underlong, or unsafe-permission pepper files fail closed.
 - SQL ID `0` is always invalid.
-- Accepted SQL IDs are `1..(2^32 - 1)`.
-- The raw all-ones ID-index state is rejected.
+- Accepted SQL IDs are `1..(2^64 - 1)`.
+- Range `0` accepts IDs `1..(2^32 - 1)`.
+- Range `1` accepts IDs `2^32..(2^64 - 1)`.
+- Noncanonical range/ID combinations are rejected after tag validation.

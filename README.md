@@ -13,7 +13,7 @@ order_id = hex_to_id(public_id)
 The public ID is always:
 
 ```text
-16 lowercase hex characters
+32 lowercase hex characters
 ```
 
 No UUID primary keys.
@@ -59,29 +59,33 @@ decoding.
 
 ## Bit Layout
 
-The current format uses the full 64-bit / 16-hex-character budget:
+The current format uses the full 128-bit / 32-hex-character budget:
 
 ```text
-3 version bits + 5 label bits + 32 id bits + 24 keyed tag bits = 64 bits
+3 version bits + 5 label bits + 1 range bit + id bits + keyed tag bits = 128 bits
 ```
 
 Plain value before the keyed permutation:
 
 ```text
-[ version ][ label ][ zero-based SQL id index ][ keyed validation tag ]
+[ version ][ label ][ canonical range ][ SQL id ][ keyed validation tag ]
 ```
 
-Then the whole 64-bit value is passed through a secret-keyed Feistel permutation
-and encoded as lowercase hex.
+Then the whole 128-bit value is passed through a secret-keyed Feistel
+permutation and encoded as lowercase hex.
 
 Capacity:
 
-| Field   | Values                                      |
-| ------- | ------------------------------------------- |
+| Field   | Values |
+| ------- | ------ |
 | Version | `0..7`; issues `2`; `1`, `3..6` inactive/future; `0`, `7` reserved |
 | Label   | `0` means no label, `1..30` named, `31` reserved |
-| SQL ID  | `1..4,294,967,295`                          |
-| Tag     | 24 keyed validation bits                    |
+| Range   | `0` for IDs `1..4,294,967,295`; `1` for IDs `4,294,967,296..18,446,744,073,709,551,615` |
+| SQL ID  | BIGINT UNSIGNED range `1..18,446,744,073,709,551,615` |
+| Tag     | 87 keyed validation bits in range `0`; 55 keyed validation bits in range `1` |
+
+Every positive BIGINT UNSIGNED value has exactly one canonical encoding.
+Values that fit inside 32 bits use the spare envelope space as a larger tag.
 
 ---
 
@@ -282,6 +286,8 @@ id
 public_hex
 label_id
 label
+range_class
+tag_bits
 version
 error_code
 error
@@ -293,7 +299,7 @@ Typical errors include:
 | --------------------- | --------------------------------------- |
 | `not_string`          | Input was not a string                  |
 | `invalid_hex`         | Input contained non-hex characters      |
-| `unsupported_length`  | Public ID was not exactly 16 hex chars  |
+| `unsupported_length`  | Public ID was not exactly 32 hex chars  |
 | `bad_config`          | Password, salt, or layout config failed |
 | `missing_pepper_file` | Pepper file does not exist              |
 | `unreadable_pepper_file` | Pepper file could not be read        |
@@ -306,7 +312,7 @@ Typical errors include:
 | `unsupported_version` | Decoded version is not active           |
 | `reserved_label`      | Decoded label is reserved               |
 | `label_mismatch`      | Decoded label was not the expected one  |
-| `id_out_of_range`     | Decoded ID is outside the public range  |
+| `id_out_of_range`     | Decoded ID is outside its canonical range |
 
 ---
 
@@ -340,17 +346,17 @@ issued public IDs stop decoding. Do not reuse one value for another.
 
 ## Security Shape
 
-For one fixed expected label, including `label=0`, a random 16-character hex
+For one fixed expected label, including `label=0`, a random 32-character hex
 string is accepted with probability:
 
 ```text
-(2^32 - 1) / 2^64
+(2^64 - 1) / 2^128
 ```
 
 That is just under:
 
 ```text
-1 in 2^32
+1 in 2^64
 ```
 
 The strict APIs enforce one expected label:
@@ -408,7 +414,7 @@ At that rate, the expected time to hit any strict expected-label decoder-valid
 handle is roughly:
 
 ```text
-24,515 years per bucket
+105,289,635,123,913 years per bucket
 ```
 
 That still only means decoder-valid.

@@ -1,11 +1,12 @@
-"""Reversible 16-hex-character public IDs for SQL integer keys.
+"""Reversible 32-hex-character public IDs for SQL BIGINT integer keys.
 
 This module turns a positive SQL integer ID, with optional label bits, into a
 deterministic public hex ID. It turns a valid public hex ID back into the
 original integer only through the exact expected-label decoder. The public ID is
-always 16 lowercase hex characters:
+always 32 lowercase hex characters:
 
-    3 version bits + 5 label bits + 32 id bits + 24 keyed tag bits = 64 bits
+    3 version bits + 5 label bits + 1 range bit + id bits + keyed tag bits
+    = 128 bits
 
 Label ``0`` is the unlabeled mode used by ``id_to_hex()`` and
 ``hex_to_id()``. Labels ``1..30`` are typed/table/bucket labels used only by the
@@ -13,11 +14,18 @@ explicit labeled API. Label ``31`` is reserved.
 
 Plain layout before the Feistel permutation:
 
-    [ version ][ label ][ zero-based SQL id index ][ keyed validation tag ]
+    [ version ][ label ][ canonical range ][ SQL id ][ keyed validation tag ]
 
-The keyed validation tag covers the scheme, bit layout, version, label, and ID
-index. A valid labeled ID cannot be reinterpreted as unlabeled, and a valid ID
-for one label cannot be decoded by asking for another label.
+The range bit is an internal canonical encoding choice for BIGINT UNSIGNED IDs:
+
+    range 0: SQL IDs 1..2**32 - 1 use a 32-bit ID field and an 87-bit tag
+    range 1: SQL IDs 2**32..2**64 - 1 use a 64-bit ID field and a 55-bit tag
+
+Every positive BIGINT UNSIGNED value has exactly one canonical public encoding.
+
+The keyed validation tag covers the scheme, bit layout, version, label, range,
+and SQL ID. A valid labeled ID cannot be reinterpreted as unlabeled, and a valid
+ID for one label cannot be decoded by asking for another label.
 
 Security model:
 
@@ -37,7 +45,7 @@ Strict decoder probability:
 
     For one expected label, random-valid probability is:
 
-        (2**32 - 1) / 2**64, just under 2**-32
+        (2**64 - 1) / 2**128, just under 2**-64
 
 Generic inspection:
 
@@ -47,7 +55,7 @@ Generic inspection:
 
 Secret configuration:
 
-    This v3 scheme requires three independent inputs: DOMAIN_SALT_HEX,
+    This v4 scheme requires three independent inputs: DOMAIN_SALT_HEX,
     XCTX_ID_PASSWORD, and a disk pepper file. Replace DOMAIN_SALT_HEX near the
     top of this file with a deployment-specific 32-byte random hex string, set
     XCTX_ID_PASSWORD to at least 32 UTF-8 bytes, and create the pepper file
@@ -70,10 +78,10 @@ Operational hardening:
 
         10 * 2 * 24 * 365 = 175_200 guesses/year/bucket
 
-    For strict expected-label decoding, random-valid odds are just under 2**-32,
+    For strict expected-label decoding, random-valid odds are just under 2**-64,
     so the worst-case expected time to hit any decoder-valid public ID is:
 
-        2**32 / 175_200 ~= 24_515 years/bucket
+        2**64 / 175_200 ~= 105_289_635_123_913 years/bucket
 
     This rate-limit policy raises the practical online attack cost. It does not
     turn these IDs into possession-grants-access tokens. For reset links,
@@ -111,13 +119,20 @@ MIN_PEPPER_BYTES: Final[int] = 32
 MAX_PEPPER_BYTES: Final[int] = 128
 MIN_PEPPER_UNIQUE_BYTES: Final[int] = 8
 
-SCHEME_REVISION: Final[int] = 3
+SCHEME_REVISION: Final[int] = 4
 VERSION_BITS: Final[int] = 3
 LABEL_BITS: Final[int] = 5
-ID_BITS: Final[int] = 32
-TAG_BITS: Final[int] = 24
-TOTAL_BITS: Final[int] = 64
-HEX_CHARS: Final[int] = 16
+RANGE_BITS: Final[int] = 1
+SMALL_RANGE_CLASS: Final[int] = 0
+BIGINT_RANGE_CLASS: Final[int] = 1
+SMALL_ID_BITS: Final[int] = 32
+BIGINT_ID_BITS: Final[int] = 64
+TOTAL_BITS: Final[int] = 128
+HEX_CHARS: Final[int] = 32
+SMALL_TAG_BITS: Final[int] = TOTAL_BITS - VERSION_BITS - LABEL_BITS - RANGE_BITS - SMALL_ID_BITS
+BIGINT_TAG_BITS: Final[int] = TOTAL_BITS - VERSION_BITS - LABEL_BITS - RANGE_BITS - BIGINT_ID_BITS
+ID_BITS: Final[int] = BIGINT_ID_BITS
+TAG_BITS: Final[int] = BIGINT_TAG_BITS
 
 ISSUE_VERSION: Final[int] = 2
 NO_LABEL: Final[int] = 0
@@ -125,8 +140,10 @@ RESERVED_VERSION: Final[int] = (1 << VERSION_BITS) - 1
 RESERVED_LABEL: Final[int] = (1 << LABEL_BITS) - 1
 MAX_LABEL: Final[int] = RESERVED_LABEL - 1
 MIN_ID: Final[int] = 1
-MAX_ID: Final[int] = (1 << ID_BITS) - 1
-MYSQL_UNSIGNED_INT_MAX: Final[int] = MAX_ID
+SMALL_RANGE_MAX_ID: Final[int] = (1 << SMALL_ID_BITS) - 1
+BIGINT_RANGE_MIN_ID: Final[int] = SMALL_RANGE_MAX_ID + 1
+MAX_ID: Final[int] = (1 << BIGINT_ID_BITS) - 1
+MYSQL_UNSIGNED_BIGINT_MAX: Final[int] = MAX_ID
 ROUNDS: Final[int] = 16
 
 ACTIVE_DECODE_VERSIONS: Final[frozenset[int]] = frozenset({ISSUE_VERSION})
@@ -151,15 +168,58 @@ _LABEL_NAME_RE: Final[re.Pattern[str]] = re.compile(r"^[a-z][a-z0-9_]{0,31}$")
 
 
 @dataclass(frozen=True)
+class SqlIdRangeLayout:
+    """One canonical ID range inside the fixed public-ID layout."""
+
+    range_class: int
+    min_id: int
+    max_id: int
+    id_bits: int
+    tag_bits: int
+
+    @property
+    def id_states(self) -> int:
+        return 1 << self.id_bits
+
+    @property
+    def valid_id_count(self) -> int:
+        return self.max_id - self.min_id + 1
+
+    @property
+    def id_mask(self) -> int:
+        return (1 << self.id_bits) - 1
+
+    @property
+    def tag_mask(self) -> int:
+        return (1 << self.tag_bits) - 1
+
+    @property
+    def id_bytes(self) -> int:
+        return (self.id_bits + 7) // 8
+
+    @property
+    def tag_bytes(self) -> int:
+        return (self.tag_bits + 7) // 8
+
+    def domain_label(self) -> bytes:
+        """Return canonical bytes for this range class."""
+        return (
+            f"range={self.range_class};min_id={self.min_id};"
+            f"max_id={self.max_id};id_bits={self.id_bits};"
+            f"tag_bits={self.tag_bits}"
+        ).encode("ascii")
+
+
+@dataclass(frozen=True)
 class SqlIdLayout:
-    """The fixed 64-bit public-ID layout."""
+    """The fixed 128-bit public-ID layout."""
 
     version_bits: int
     label_bits: int
-    id_bits: int
-    tag_bits: int
+    range_bits: int
     total_bits: int
     hex_chars: int
+    ranges: tuple[SqlIdRangeLayout, ...]
 
     @property
     def bytes(self) -> int:
@@ -171,9 +231,23 @@ class SqlIdLayout:
 
     @property
     def max_id(self) -> int:
-        # ID 0 is invalid and SQL IDs are represented as zero-based indexes.
-        # Rejecting the raw all-ones id-index state makes max == 2**32 - 1.
-        return (1 << self.id_bits) - 1
+        return max(range_layout.max_id for range_layout in self.ranges)
+
+    @property
+    def valid_id_count(self) -> int:
+        return sum(range_layout.valid_id_count for range_layout in self.ranges)
+
+    @property
+    def id_bits(self) -> int:
+        return max(range_layout.id_bits for range_layout in self.ranges)
+
+    @property
+    def min_tag_bits(self) -> int:
+        return min(range_layout.tag_bits for range_layout in self.ranges)
+
+    @property
+    def max_tag_bits(self) -> int:
+        return max(range_layout.tag_bits for range_layout in self.ranges)
 
     @property
     def version_mask(self) -> int:
@@ -184,24 +258,12 @@ class SqlIdLayout:
         return (1 << self.label_bits) - 1
 
     @property
-    def id_mask(self) -> int:
-        return (1 << self.id_bits) - 1
-
-    @property
-    def tag_mask(self) -> int:
-        return (1 << self.tag_bits) - 1
+    def range_mask(self) -> int:
+        return (1 << self.range_bits) - 1
 
     @property
     def value_mask(self) -> int:
         return (1 << self.total_bits) - 1
-
-    @property
-    def tag_bytes(self) -> int:
-        return (self.tag_bits + 7) // 8
-
-    @property
-    def id_bytes(self) -> int:
-        return (self.id_bits + 7) // 8
 
     @property
     def half_bits(self) -> int:
@@ -217,22 +279,42 @@ class SqlIdLayout:
 
     @property
     def random_valid_probability_for_expected_label(self) -> float:
-        return self.max_id / float(1 << self.total_bits)
+        return self.valid_id_count / float(1 << self.total_bits)
 
     @property
     def random_valid_probability_for_any_label(self) -> float:
-        return ((MAX_LABEL + 1) * self.max_id) / float(1 << self.total_bits)
+        return ((MAX_LABEL + 1) * self.valid_id_count) / float(1 << self.total_bits)
+
+    @property
+    def header_bits(self) -> int:
+        return self.version_bits + self.label_bits + self.range_bits
+
+    def range_for_class(self, range_class: int) -> SqlIdRangeLayout:
+        """Return range metadata for an encoded range class."""
+        for range_layout in self.ranges:
+            if range_layout.range_class == range_class:
+                return range_layout
+        raise ValueError(f"unsupported range class: {range_class}")
+
+    def range_for_id(self, id_value: int) -> SqlIdRangeLayout:
+        """Return the canonical range class for one SQL ID."""
+        for range_layout in self.ranges:
+            if range_layout.min_id <= id_value <= range_layout.max_id:
+                return range_layout
+        raise ValueError(f"id is outside range {MIN_ID}..{self.max_id}")
 
     def domain_label(self) -> bytes:
         """Return canonical bytes for key-domain separation."""
+        ranges = b"|".join(range_layout.domain_label() for range_layout in self.ranges)
         return (
             f"scheme={SCHEME_REVISION};version_bits={self.version_bits};"
-            f"label_bits={self.label_bits};id_bits={self.id_bits};"
-            f"tag_bits={self.tag_bits};total_bits={self.total_bits};"
+            f"label_bits={self.label_bits};range_bits={self.range_bits};"
+            f"total_bits={self.total_bits};"
             f"hex_chars={self.hex_chars};issue_version={ISSUE_VERSION};"
             f"no_label={NO_LABEL};max_label={MAX_LABEL};"
             f"reserved_label={RESERVED_LABEL};reserved_version={RESERVED_VERSION}"
-        ).encode("ascii")
+            ";ranges="
+        ).encode("ascii") + ranges
 
 
 @dataclass(frozen=True)
@@ -244,25 +326,41 @@ class SqlIdValidation:
     public_hex: str | None = None
     label_id: int | None = None
     label: str | None = None
+    range_class: int | None = None
+    tag_bits: int | None = None
     version: int | None = None
     layout: SqlIdLayout | None = None
     error_code: str | None = None
     error: str | None = None
 
 
+SMALL_RANGE_LAYOUT: Final[SqlIdRangeLayout] = SqlIdRangeLayout(
+    range_class=SMALL_RANGE_CLASS,
+    min_id=MIN_ID,
+    max_id=SMALL_RANGE_MAX_ID,
+    id_bits=SMALL_ID_BITS,
+    tag_bits=SMALL_TAG_BITS,
+)
+BIGINT_RANGE_LAYOUT: Final[SqlIdRangeLayout] = SqlIdRangeLayout(
+    range_class=BIGINT_RANGE_CLASS,
+    min_id=BIGINT_RANGE_MIN_ID,
+    max_id=MAX_ID,
+    id_bits=BIGINT_ID_BITS,
+    tag_bits=BIGINT_TAG_BITS,
+)
 DEFAULT_LAYOUT: Final[SqlIdLayout] = SqlIdLayout(
     version_bits=VERSION_BITS,
     label_bits=LABEL_BITS,
-    id_bits=ID_BITS,
-    tag_bits=TAG_BITS,
+    range_bits=RANGE_BITS,
     total_bits=TOTAL_BITS,
     hex_chars=HEX_CHARS,
+    ranges=(SMALL_RANGE_LAYOUT, BIGINT_RANGE_LAYOUT),
 )
 LAYOUT: Final[SqlIdLayout] = DEFAULT_LAYOUT
 MAX_PUBLIC_HEX_CHARS: Final[int] = HEX_CHARS
 
-# Hard caps for untrusted string inputs. Public IDs are exactly 16 hex chars,
-# and uint32 decimal IDs need 10 digits; 32 leaves room for leading-zero padding.
+# Hard caps for untrusted string inputs. Public IDs are exactly 32 hex chars,
+# and uint64 decimal IDs need 20 digits; 32 leaves room for leading-zero padding.
 _MAX_PUBLIC_HEX_CHARS: Final[int] = HEX_CHARS
 _MAX_DECIMAL_ID_STRING_CHARS: Final[int] = 32
 _MAX_CONFIG_FILE_BYTES: Final[int] = 2000
@@ -282,6 +380,11 @@ __all__ = [
     "DOMAIN_SALT_HEX",
     "ENV_PASSWORD_NAME",
     "HEX_CHARS",
+    "BIGINT_ID_BITS",
+    "BIGINT_RANGE_CLASS",
+    "BIGINT_RANGE_LAYOUT",
+    "BIGINT_RANGE_MIN_ID",
+    "BIGINT_TAG_BITS",
     "ID_BITS",
     "ISSUE_VERSION",
     "LABEL_BITS",
@@ -295,15 +398,22 @@ __all__ = [
     "MIN_PEPPER_BYTES",
     "MIN_PEPPER_HEX_CHARS",
     "MIN_PASSWORD_BYTES",
-    "MYSQL_UNSIGNED_INT_MAX",
+    "MYSQL_UNSIGNED_BIGINT_MAX",
     "NO_LABEL",
     "PEPPER_FILE_LOCATION_KEY",
+    "RANGE_BITS",
     "RESERVED_LABEL",
     "RESERVED_VERSION",
     "ROUNDS",
     "SCHEME_REVISION",
+    "SMALL_ID_BITS",
+    "SMALL_RANGE_CLASS",
+    "SMALL_RANGE_LAYOUT",
+    "SMALL_RANGE_MAX_ID",
+    "SMALL_TAG_BITS",
     "SUPPORTED_HEX_LENGTHS",
     "SqlIdLayout",
+    "SqlIdRangeLayout",
     "SqlIdValidation",
     "TAG_BITS",
     "TOTAL_BITS",
@@ -362,17 +472,21 @@ def _registry_is_sane() -> bool:
         return False
     if ROUNDS < 12:
         return False
-    if VERSION_BITS != 3 or LABEL_BITS != 5 or ID_BITS != 32 or TAG_BITS != 24:
+    if VERSION_BITS != 3 or LABEL_BITS != 5 or RANGE_BITS != 1:
         return False
-    if TOTAL_BITS != VERSION_BITS + LABEL_BITS + ID_BITS + TAG_BITS:
+    if SMALL_ID_BITS != 32 or BIGINT_ID_BITS != 64:
         return False
-    if TOTAL_BITS != 64 or HEX_CHARS != 16:
+    if ID_BITS != BIGINT_ID_BITS or TAG_BITS != BIGINT_TAG_BITS:
+        return False
+    if SMALL_TAG_BITS != 87 or BIGINT_TAG_BITS != 55:
+        return False
+    if TOTAL_BITS != 128 or HEX_CHARS != 32:
         return False
     if DEFAULT_LAYOUT.total_bits != TOTAL_BITS or DEFAULT_LAYOUT.hex_chars != HEX_CHARS:
         return False
-    if DEFAULT_LAYOUT.bytes != 8 or DEFAULT_LAYOUT.half_bits != 32:
+    if DEFAULT_LAYOUT.bytes != 16 or DEFAULT_LAYOUT.half_bits != 64:
         return False
-    if SCHEME_REVISION != 3:
+    if SCHEME_REVISION != 4:
         return False
     if ISSUE_VERSION != 2:
         return False
@@ -382,11 +496,17 @@ def _registry_is_sane() -> bool:
         return False
     if NO_LABEL != 0 or RESERVED_LABEL != 31 or MAX_LABEL != 30:
         return False
-    if MIN_ID != 1 or MAX_ID != (1 << 32) - 1:
+    if SMALL_RANGE_CLASS != 0 or BIGINT_RANGE_CLASS != 1:
         return False
-    if MYSQL_UNSIGNED_INT_MAX != MAX_ID:
+    if MIN_ID != 1 or SMALL_RANGE_MAX_ID != (1 << 32) - 1:
         return False
-    if SUPPORTED_HEX_LENGTHS != (16,):
+    if BIGINT_RANGE_MIN_ID != SMALL_RANGE_MAX_ID + 1:
+        return False
+    if MAX_ID != (1 << 64) - 1:
+        return False
+    if MYSQL_UNSIGNED_BIGINT_MAX != MAX_ID:
+        return False
+    if SUPPORTED_HEX_LENGTHS != (32,):
         return False
     if MIN_PEPPER_HEX_CHARS != 64 or MAX_PEPPER_HEX_CHARS != 256:
         return False
@@ -396,7 +516,30 @@ def _registry_is_sane() -> bool:
         return False
 
     layout = DEFAULT_LAYOUT
-    if layout.version_bits + layout.label_bits + layout.id_bits + layout.tag_bits != layout.total_bits:
+    if len(layout.ranges) != 2:
+        return False
+    if {range_layout.range_class for range_layout in layout.ranges} != {SMALL_RANGE_CLASS, BIGINT_RANGE_CLASS}:
+        return False
+    for range_layout in layout.ranges:
+        if range_layout.range_class > layout.range_mask:
+            return False
+        if range_layout.id_bits <= 0 or range_layout.tag_bits <= 0:
+            return False
+        if layout.header_bits + range_layout.id_bits + range_layout.tag_bits != layout.total_bits:
+            return False
+        if not MIN_ID <= range_layout.min_id <= range_layout.max_id <= range_layout.id_mask:
+            return False
+    if layout.range_for_class(SMALL_RANGE_CLASS) != SMALL_RANGE_LAYOUT:
+        return False
+    if layout.range_for_class(BIGINT_RANGE_CLASS) != BIGINT_RANGE_LAYOUT:
+        return False
+    if layout.range_for_id(1) != SMALL_RANGE_LAYOUT:
+        return False
+    if layout.range_for_id(SMALL_RANGE_MAX_ID) != SMALL_RANGE_LAYOUT:
+        return False
+    if layout.range_for_id(BIGINT_RANGE_MIN_ID) != BIGINT_RANGE_LAYOUT:
+        return False
+    if layout.range_for_id(MAX_ID) != BIGINT_RANGE_LAYOUT:
         return False
     if layout.total_bits % 8 != 0 or layout.total_bits % 2 != 0:
         return False
@@ -404,9 +547,13 @@ def _registry_is_sane() -> bool:
         return False
     if layout.max_id != MAX_ID:
         return False
+    if layout.valid_id_count != MAX_ID:
+        return False
     if layout.version_mask != RESERVED_VERSION:
         return False
     if layout.label_mask != RESERVED_LABEL:
+        return False
+    if layout.range_mask != 1:
         return False
     if layout.half_bits > 256:
         return False
@@ -421,7 +568,7 @@ def _constants_are_sane() -> bool:
 
 
 def layout_for_hex_length(hex_chars: object) -> SqlIdLayout | None:
-    """Return the fixed layout for 16 hex chars, or None."""
+    """Return the fixed layout for 32 hex chars, or None."""
     if isinstance(hex_chars, bool) or not isinstance(hex_chars, int):
         return None
     return DEFAULT_LAYOUT if hex_chars == HEX_CHARS else None
@@ -891,7 +1038,7 @@ def _derive_material(password_bytes: bytes, pepper_bytes: bytes, layout: SqlIdLa
     root_key = hmac.new(
         password_bytes,
         (
-            b"xctx-sql-id-root-v3:"
+            b"xctx-sql-id-root-v4:"
             + layout.domain_label()
             + b":salt:"
             + _DOMAIN_SALT
@@ -902,7 +1049,7 @@ def _derive_material(password_bytes: bytes, pepper_bytes: bytes, layout: SqlIdLa
     ).digest()
     seed = hmac.new(
         root_key,
-        b":xctx-sql-id-v3-feistel-and-tag-seed:" + layout.domain_label(),
+        b":xctx-sql-id-v4-feistel-and-tag-seed:" + layout.domain_label(),
         hashlib.sha256,
     ).digest()
 
@@ -917,7 +1064,12 @@ def _derive_material(password_bytes: bytes, pepper_bytes: bytes, layout: SqlIdLa
 
     tag_key = hmac.new(
         seed,
-        b":keyed-validation-tag:" + layout.tag_bits.to_bytes(2, "big"),
+        (
+            b":keyed-validation-tags:"
+            + layout.min_tag_bits.to_bytes(2, "big")
+            + b":"
+            + layout.max_tag_bits.to_bytes(2, "big")
+        ),
         hashlib.sha256,
     ).digest()
     return outer_round_keys, tag_key
@@ -953,7 +1105,7 @@ def _coerce_id(value: object, layout: SqlIdLayout = DEFAULT_LAYOUT) -> int:
         max_digits = len(str(layout.max_id))
         significant_digits = value.lstrip("0") or "0"
         if len(significant_digits) > max_digits:
-            raise _InputError("id string too long for uint32 range")
+            raise _InputError("id string too long for uint64 range")
         id_value = int(value)
     else:
         raise _InputError("id must be an int or decimal digit string")
@@ -997,14 +1149,24 @@ def _feistel_decrypt(value: int, round_keys: tuple[bytes, ...], layout: SqlIdLay
     return ((left << layout.half_bits) | right) & layout.value_mask
 
 
-def _tag(version: int, label_id: int, id_index: int, tag_key: bytes, layout: SqlIdLayout = DEFAULT_LAYOUT) -> int:
-    """Return a keyed validation tag for version, label, and id-index."""
+def _tag(
+    version: int,
+    label_id: int,
+    range_class: int,
+    id_value: int,
+    tag_key: bytes,
+    layout: SqlIdLayout = DEFAULT_LAYOUT,
+) -> int:
+    """Return a keyed validation tag for version, label, range, and SQL ID."""
     if not 0 <= version <= layout.version_mask:
         raise ValueError("version out of range")
     if not 0 <= label_id <= layout.label_mask:
         raise ValueError("label out of range")
-    if not 0 <= id_index <= layout.id_mask:
-        raise ValueError("id index out of range")
+    if not 0 <= range_class <= layout.range_mask:
+        raise ValueError("range class out of range")
+    range_layout = layout.range_for_class(range_class)
+    if not 0 <= id_value <= range_layout.id_mask:
+        raise ValueError("id value out of range for range class")
 
     message = (
         layout.domain_label()
@@ -1012,62 +1174,97 @@ def _tag(version: int, label_id: int, id_index: int, tag_key: bytes, layout: Sql
         + version.to_bytes(1, "big")
         + b":label:"
         + label_id.to_bytes(1, "big")
-        + b":id-index:"
-        + id_index.to_bytes(layout.id_bytes, "big")
+        + b":range:"
+        + range_class.to_bytes(1, "big")
+        + b":id:"
+        + id_value.to_bytes(range_layout.id_bytes, "big")
     )
     digest = hmac.new(tag_key, message, hashlib.sha256).digest()
-    return int.from_bytes(digest[: layout.tag_bytes], "big") & layout.tag_mask
+    return int.from_bytes(digest[: range_layout.tag_bytes], "big") & range_layout.tag_mask
 
 
-def _tags_equal(left: int, right: int, layout: SqlIdLayout = DEFAULT_LAYOUT) -> bool:
+def _tags_equal(left: int, right: int, range_layout: SqlIdRangeLayout) -> bool:
     """Compare compact integer tags without data-dependent short-circuiting."""
     return hmac.compare_digest(
-        (left & layout.tag_mask).to_bytes(layout.tag_bytes, "big"),
-        (right & layout.tag_mask).to_bytes(layout.tag_bytes, "big"),
+        (left & range_layout.tag_mask).to_bytes(range_layout.tag_bytes, "big"),
+        (right & range_layout.tag_mask).to_bytes(range_layout.tag_bytes, "big"),
     )
+
+
+def _pack_plain_fields(
+    version: int,
+    label_id: int,
+    range_class: int,
+    id_value: int,
+    tag: int,
+    layout: SqlIdLayout = DEFAULT_LAYOUT,
+) -> int:
+    """Pack already-validated field-width values into one plaintext integer."""
+    if not 0 <= version <= layout.version_mask:
+        raise ValueError("version out of range")
+    if not 0 <= label_id <= layout.label_mask:
+        raise ValueError("label out of range")
+    if not 0 <= range_class <= layout.range_mask:
+        raise ValueError("range class out of range")
+    range_layout = layout.range_for_class(range_class)
+    if not 0 <= id_value <= range_layout.id_mask:
+        raise ValueError("id value out of range for range class")
+    if not 0 <= tag <= range_layout.tag_mask:
+        raise ValueError("tag out of range for range class")
+
+    return (
+        ((version & layout.version_mask) << (layout.total_bits - layout.version_bits))
+        | ((label_id & layout.label_mask) << (layout.total_bits - layout.version_bits - layout.label_bits))
+        | ((range_class & layout.range_mask) << (layout.total_bits - layout.header_bits))
+        | ((id_value & range_layout.id_mask) << range_layout.tag_bits)
+        | tag
+    ) & layout.value_mask
 
 
 def _pack_plain(
     version: int,
     label_id: int,
-    id_index: int,
+    id_value: int,
     tag_key: bytes,
     layout: SqlIdLayout = DEFAULT_LAYOUT,
+    *,
+    range_class: int | None = None,
 ) -> int:
-    """Pack version, label, zero-based ID index, and keyed tag into 64 bits."""
+    """Pack version, label, canonical SQL ID range, ID, and keyed tag into 128 bits."""
     if not 0 <= version <= layout.version_mask:
         raise ValueError("version out of range")
     if not 0 <= label_id <= layout.label_mask:
         raise ValueError("label out of range")
-    if not 0 <= id_index < layout.max_id:
-        raise ValueError("id index out of public range")
+    if range_class is None:
+        range_layout = layout.range_for_id(id_value)
+    else:
+        range_layout = layout.range_for_class(range_class)
+        if not range_layout.min_id <= id_value <= range_layout.max_id:
+            raise ValueError("id value is outside the canonical range class")
 
-    tag = _tag(version, label_id, id_index, tag_key, layout)
-    return (
-        ((version & layout.version_mask) << (layout.label_bits + layout.id_bits + layout.tag_bits))
-        | ((label_id & layout.label_mask) << (layout.id_bits + layout.tag_bits))
-        | ((id_index & layout.id_mask) << layout.tag_bits)
-        | tag
-    ) & layout.value_mask
+    tag = _tag(version, label_id, range_layout.range_class, id_value, tag_key, layout)
+    return _pack_plain_fields(version, label_id, range_layout.range_class, id_value, tag, layout)
 
 
-def _unpack_plain(value: int, layout: SqlIdLayout = DEFAULT_LAYOUT) -> tuple[int, int, int, int]:
-    """Unpack a 64-bit plaintext value into version, label, id-index, and tag."""
+def _unpack_plain(value: int, layout: SqlIdLayout = DEFAULT_LAYOUT) -> tuple[int, int, int, int, int]:
+    """Unpack a plaintext value into version, label, range class, SQL ID, and tag."""
     if not 0 <= value <= layout.value_mask:
         raise ValueError("value is outside layout range")
 
-    version = (value >> (layout.label_bits + layout.id_bits + layout.tag_bits)) & layout.version_mask
-    label_id = (value >> (layout.id_bits + layout.tag_bits)) & layout.label_mask
-    id_index = (value >> layout.tag_bits) & layout.id_mask
-    tag = value & layout.tag_mask
-    return version, label_id, id_index, tag
+    version = (value >> (layout.total_bits - layout.version_bits)) & layout.version_mask
+    label_id = (value >> (layout.total_bits - layout.version_bits - layout.label_bits)) & layout.label_mask
+    range_class = (value >> (layout.total_bits - layout.header_bits)) & layout.range_mask
+    range_layout = layout.range_for_class(range_class)
+    id_value = (value >> range_layout.tag_bits) & range_layout.id_mask
+    tag = value & range_layout.tag_mask
+    return version, label_id, range_class, id_value, tag
 
 
 def _encode_with_label(id_value: object, label_id: int) -> str | None:
     try:
         sql_id = _coerce_id(id_value, DEFAULT_LAYOUT)
         round_keys, tag_key = _key_material(DEFAULT_LAYOUT)
-        plain = _pack_plain(ISSUE_VERSION, label_id, sql_id - 1, tag_key, DEFAULT_LAYOUT)
+        plain = _pack_plain(ISSUE_VERSION, label_id, sql_id, tag_key, DEFAULT_LAYOUT)
         encrypted = _feistel_encrypt(plain, round_keys, DEFAULT_LAYOUT)
         return f"{encrypted:0{HEX_CHARS}x}"
     except Exception:  # noqa: BLE001 - public convenience API returns None
@@ -1106,12 +1303,16 @@ def _validation_error(
     layout: SqlIdLayout | None = None,
     version: int | None = None,
     label_id: int | None = None,
+    range_class: int | None = None,
+    tag_bits: int | None = None,
 ) -> SqlIdValidation:
     return SqlIdValidation(
         ok=False,
         public_hex=public_hex,
         label_id=label_id,
         label=_label_name_for_id(label_id) if label_id is not None else None,
+        range_class=range_class,
+        tag_bits=tag_bits,
         version=version,
         layout=layout,
         error_code=code,
@@ -1147,10 +1348,11 @@ def _decode_public_hex(value: object, *, expected_label: int | None) -> SqlIdVal
         round_keys, tag_key = _key_material(DEFAULT_LAYOUT)
         encrypted = int(public_hex, 16)
         plain = _feistel_decrypt(encrypted, round_keys, DEFAULT_LAYOUT)
-        version, label_id, id_index, supplied_tag = _unpack_plain(plain, DEFAULT_LAYOUT)
+        version, label_id, range_class, id_value, supplied_tag = _unpack_plain(plain, DEFAULT_LAYOUT)
+        range_layout = DEFAULT_LAYOUT.range_for_class(range_class)
 
-        expected_tag = _tag(version, label_id, id_index, tag_key, DEFAULT_LAYOUT)
-        if not _tags_equal(supplied_tag, expected_tag, DEFAULT_LAYOUT):
+        expected_tag = _tag(version, label_id, range_class, id_value, tag_key, DEFAULT_LAYOUT)
+        if not _tags_equal(supplied_tag, expected_tag, range_layout):
             raise _ValidationFailure("tag_mismatch", "public id validation tag does not match")
         if version not in ACTIVE_DECODE_VERSIONS:
             raise _ValidationFailure("unsupported_version", "public id uses an inactive version")
@@ -1158,12 +1360,8 @@ def _decode_public_hex(value: object, *, expected_label: int | None) -> SqlIdVal
             raise _ValidationFailure("reserved_label", "public id uses a reserved label")
         if expected_label is not None and label_id != expected_label:
             raise _ValidationFailure("label_mismatch", "public id label does not match the expected label")
-        if not 0 <= id_index < DEFAULT_LAYOUT.max_id:
-            raise _ValidationFailure("id_out_of_range", "decoded id is outside the public range")
-
-        id_value = id_index + 1
-        if not MIN_ID <= id_value <= DEFAULT_LAYOUT.max_id:
-            raise _ValidationFailure("id_out_of_range", "decoded id is outside the public range")
+        if not range_layout.min_id <= id_value <= range_layout.max_id:
+            raise _ValidationFailure("id_out_of_range", "decoded id is outside the canonical range")
 
         return SqlIdValidation(
             ok=True,
@@ -1171,6 +1369,8 @@ def _decode_public_hex(value: object, *, expected_label: int | None) -> SqlIdVal
             public_hex=public_hex,
             label_id=label_id,
             label=_label_name_for_id(label_id),
+            range_class=range_class,
+            tag_bits=range_layout.tag_bits,
             version=version,
             layout=DEFAULT_LAYOUT,
         )
@@ -1184,6 +1384,8 @@ def _decode_public_hex(value: object, *, expected_label: int | None) -> SqlIdVal
             layout=DEFAULT_LAYOUT,
             version=locals().get("version"),
             label_id=locals().get("label_id"),
+            range_class=locals().get("range_class"),
+            tag_bits=locals().get("range_layout").tag_bits if "range_layout" in locals() else None,
         )
     except Exception as exc:  # noqa: BLE001 - validation returns a real error, not an exception
         return _validation_error("internal_error", f"internal validation failure: {exc}", public_hex=public_hex, layout=DEFAULT_LAYOUT)

@@ -5,7 +5,7 @@ Run:
     ./bin_demo/sql_id_demo_for_dev.py
     ./bin_demo/sql_id_demo_for_dev.py --int_id 1
     ./bin_demo/sql_id_demo_for_dev.py --int_id 1 --label repair
-    ./bin_demo/sql_id_demo_for_dev.py --hex_id 65a5cb411fa554a0
+    ./bin_demo/sql_id_demo_for_dev.py --hex_id 8ca02d86446ce81a3339fdd1403f794a
 
 For real applications, set XCTX_ID_PASSWORD with a strong secret:
     export XCTX_ID_PASSWORD="$(python -c 'import secrets; print(secrets.token_hex(32))')"
@@ -41,14 +41,20 @@ from sql_id_library import (  # noqa: E402 - demo config is set before first pro
     DOMAIN_SALT_HEX,
     ENV_PASSWORD_NAME,
     HEX_CHARS,
+    BIGINT_RANGE_CLASS,
+    BIGINT_RANGE_MIN_ID,
+    BIGINT_TAG_BITS,
     ID_BITS,
     ISSUE_VERSION,
     LABEL_BITS,
     MAX_ID,
     MAX_LABEL,
     NO_LABEL,
+    RANGE_BITS,
     RESERVED_LABEL,
-    TAG_BITS,
+    SMALL_RANGE_CLASS,
+    SMALL_RANGE_MAX_ID,
+    SMALL_TAG_BITS,
     TOTAL_BITS,
     VERSION_BITS,
     available_labels,
@@ -169,7 +175,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="./bin_demo/sql_id_demo_for_dev.py",
         description=(
-            "Developer demo for sql_id_library: explain the fixed 16-character "
+            "Developer demo for sql_id_library: explain the fixed 32-character "
             "layout, or encode/decode one ID."
         ),
         epilog=(
@@ -178,8 +184,8 @@ def build_parser() -> argparse.ArgumentParser:
             "  ./bin_demo/sql_id_demo_for_dev.py --int_id 1\n"
             "  ./bin_demo/sql_id_demo_for_dev.py --int_id 1 --label repair\n"
             "  ./bin_demo/sql_id_demo_for_dev.py --config-file ./conf/test_sql_id_config.yaml --int_id 1 --label repair\n"
-            "  ./bin_demo/sql_id_demo_for_dev.py --hex_id 65a5cb411fa554a0\n"
-            "  ./bin_demo/sql_id_demo_for_dev.py --hex_id 65a5cb411fa554a0 --label repair\n"
+            "  ./bin_demo/sql_id_demo_for_dev.py --hex_id 8ca02d86446ce81a3339fdd1403f794a\n"
+            "  ./bin_demo/sql_id_demo_for_dev.py --hex_id 8ca02d86446ce81a3339fdd1403f794a --label repair\n"
             "  ./bin_demo/sql_id_demo_for_dev.py --strict-config --int_id 1\n\n"
             "Demo labels are loaded from ./conf/test_sql_id_config.yaml: "
             "dry_run=1, plan=2, execute=3, enquire=4, repair=5. Numeric labels "
@@ -230,7 +236,8 @@ def show_round_trip(sql_id: int, *, label: str | int | None = None) -> None:
     print(
         "Validated:  "
         f"ok={validation.ok}, label_id={validation.label_id}, "
-        f"label={validation.label}, version={validation.version}"
+        f"label={validation.label}, range_class={validation.range_class}, "
+        f"tag_bits={validation.tag_bits}, version={validation.version}"
     )
     print()
 
@@ -261,7 +268,7 @@ def show_default_demo() -> None:
 
     print("What this library does")
     print("----------------------")
-    print("Turns positive SQL integer IDs into deterministic 16-character public hex handles.")
+    print("Turns positive SQL BIGINT IDs into deterministic 32-character public hex handles.")
     print("Label 0 is unlabeled. Labels 1..30 are explicit typed handles.")
     print("It is not an auth token; decode first, then apply normal authorization rules.")
     print()
@@ -270,10 +277,20 @@ def show_default_demo() -> None:
     print("----------")
     print(f"total bits:   {TOTAL_BITS} ({HEX_CHARS} hex chars)")
     print(f"version bits: {VERSION_BITS} (currently issuing version {ISSUE_VERSION})")
-    print(f"label bits:   {LABEL_BITS} ({NO_LABEL}=no label, 1..{MAX_LABEL}=named labels, {RESERVED_LABEL}=reserved)")
-    print(f"id bits:      {ID_BITS} (SQL IDs 1..{MAX_ID:,})")
-    print(f"tag bits:     {TAG_BITS}")
-    print("plain value:  [ version ][ label ][ zero-based SQL id index ][ keyed validation tag ]")
+    print(
+        f"label bits:   {LABEL_BITS} "
+        f"({NO_LABEL}=no label, 1..{MAX_LABEL}=named labels, {RESERVED_LABEL}=reserved)"
+    )
+    print(
+        f"range bits:   {RANGE_BITS} "
+        f"({SMALL_RANGE_CLASS}=32-bit ID field, {BIGINT_RANGE_CLASS}=64-bit ID field)"
+    )
+    print(f"id bits:      up to {ID_BITS} (SQL IDs 1..{MAX_ID:,})")
+    print(
+        f"tag bits:     {SMALL_TAG_BITS} for IDs 1..{SMALL_RANGE_MAX_ID:,}; "
+        f"{BIGINT_TAG_BITS} for IDs {BIGINT_RANGE_MIN_ID:,}..{MAX_ID:,}"
+    )
+    print("plain value:  [ version ][ label ][ range ][ SQL id ][ keyed validation tag ]")
     print("public hex:   Feistel permutation of that plain value, encoded as lowercase hex")
     print()
 
@@ -336,6 +353,8 @@ def encode_cli(sql_id: int, *, label: str | int | None, details: bool) -> None:
         print(f"int_id={sql_id}")
         print(f"label_id={validation.label_id}")
         print(f"label={validation.label}")
+        print(f"range_class={validation.range_class}")
+        print(f"tag_bits={validation.tag_bits}")
         print(f"version={validation.version}")
         print(f"hex_chars={HEX_CHARS}")
         print(f"max_id={MAX_ID}")
@@ -354,6 +373,8 @@ def decode_cli(public_hex: str, *, label: str | int | None, details: bool) -> No
         print(f"hex_id={result.public_hex}")
         print(f"label_id={result.label_id}")
         print(f"label={result.label}")
+        print(f"range_class={result.range_class}")
+        print(f"tag_bits={result.tag_bits}")
         print(f"version={result.version}")
         print(f"hex_chars={HEX_CHARS}")
         print(f"max_id={MAX_ID}")
