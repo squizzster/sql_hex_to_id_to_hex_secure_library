@@ -50,10 +50,13 @@ python -c "import secrets; print(secrets.token_hex(32))" > ~/.sql_hex_id_pepper_
 chmod 0400 ~/.sql_hex_id_pepper_file.key
 ```
 
-The bundled salt is public and is accepted by the library, but changing it is
-strongly recommended for deployment hardening. Changing the salt, password, or
-pepper after public IDs have been issued makes those existing public IDs stop
-decoding.
+The bundled salt is public and is rejected during normal library use. Replace it
+before deployment. The demo and tests set `XCTX_DEMO_ALLOW_BUNDLED_DOMAIN_SALT=1`
+so sample IDs can still be generated with the bundled salt. Do not set that
+environment variable for deployed application processes.
+
+Changing the salt, password, or pepper after public IDs have been issued makes
+those existing public IDs stop decoding.
 
 ---
 

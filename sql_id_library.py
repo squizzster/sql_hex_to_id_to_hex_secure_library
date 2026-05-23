@@ -65,10 +65,10 @@ Secret configuration:
 
         python -c "import secrets; print(secrets.token_hex(32))"
 
-    The bundled domain salt is public. A private deployment-specific salt is
-    useful hardening, but it is not a substitute for the password or pepper.
-    Changing any of the salt, password, or pepper after issuing IDs makes
-    existing public IDs stop decoding.
+    The bundled domain salt is public and is rejected during normal library use.
+    The demo and tests explicitly set XCTX_DEMO_ALLOW_BUNDLED_DOMAIN_SALT=1 so
+    sample IDs can still be generated. Changing any of the salt, password, or
+    pepper after issuing IDs makes existing public IDs stop decoding.
 
 Operational hardening:
 
@@ -108,6 +108,7 @@ from typing import Final
 
 
 ENV_PASSWORD_NAME: Final[str] = "XCTX_ID_PASSWORD"
+DEMO_ALLOW_BUNDLED_DOMAIN_SALT_ENV: Final[str] = "XCTX_DEMO_ALLOW_BUNDLED_DOMAIN_SALT"
 MIN_PASSWORD_BYTES: Final[int] = 32
 MIN_PASSWORD_UNIQUE_BYTES: Final[int] = 8
 PEPPER_FILE_LOCATION_KEY: Final[str] = "pepper_file_location"
@@ -152,15 +153,17 @@ SUPPORTED_HEX_LENGTHS: Final[tuple[int, ...]] = (HEX_CHARS,)
 
 # Deployment-specific 32-byte domain-separation salt.
 #
-# The bundled value is public and accepted for library/demo use, but deployed
-# applications should replace it with a private random value generated with:
+# The bundled value is public and accepted only when the explicit demo/test
+# override is set. Deployed applications must replace it with a private random
+# value generated with:
 #
 #     python -c "import secrets; print(secrets.token_hex(32))"
 #
 # Generate this independently from XCTX_ID_PASSWORD and the pepper file.
 # Changing any of those values after issuing public IDs intentionally creates a
 # new scheme and breaks previously issued IDs.
-DOMAIN_SALT_HEX: Final[str] = "0b91b4e8fd74bcb256a19d188c83470a7b75a4897babb252e54b6eb8f8bb392d"
+BUNDLED_DOMAIN_SALT_HEX: Final[str] = "0b91b4e8fd74bcb256a19d188c83470a7b75a4897babb252e54b6eb8f8bb392d"
+DOMAIN_SALT_HEX: Final[str] = BUNDLED_DOMAIN_SALT_HEX
 _DOMAIN_SALT: Final[bytes] = bytes.fromhex(DOMAIN_SALT_HEX)
 
 _DECIMAL_RE: Final[re.Pattern[str]] = re.compile(r"^[0-9]+$")
@@ -376,8 +379,10 @@ _CONFIG_FILE_CACHE: dict[Path, Mapping[str, object]] = {}
 
 __all__ = [
     "ACTIVE_DECODE_VERSIONS",
+    "BUNDLED_DOMAIN_SALT_HEX",
     "DEFAULT_LAYOUT",
     "DEFAULT_PEPPER_FILE_LOCATION",
+    "DEMO_ALLOW_BUNDLED_DOMAIN_SALT_ENV",
     "DOMAIN_SALT_HEX",
     "ENV_PASSWORD_NAME",
     "HEX_CHARS",
@@ -473,6 +478,8 @@ def _registry_is_sane() -> bool:
     if len(_DOMAIN_SALT) != 32:
         return False
     if ROUNDS < 12:
+        return False
+    if DEMO_ALLOW_BUNDLED_DOMAIN_SALT_ENV != "XCTX_DEMO_ALLOW_BUNDLED_DOMAIN_SALT":
         return False
     if VERSION_BITS != 3 or LABEL_BITS != 5 or RANGE_BITS != 1:
         return False
@@ -913,6 +920,16 @@ def _password_bytes() -> bytes:
     return password_bytes
 
 
+def _domain_salt_bytes() -> bytes:
+    """Return domain salt bytes, rejecting the bundled salt outside demo/test use."""
+    if DOMAIN_SALT_HEX == BUNDLED_DOMAIN_SALT_HEX and os.environ.get(DEMO_ALLOW_BUNDLED_DOMAIN_SALT_ENV) != "1":
+        raise _ConfigError(
+            "bad_config",
+            f"replace DOMAIN_SALT_HEX or set {DEMO_ALLOW_BUNDLED_DOMAIN_SALT_ENV}=1 for demo/test use only",
+        )
+    return _DOMAIN_SALT
+
+
 def _configured_pepper_path() -> Path:
     with _CONFIG_LOCK:
         location = _PEPPER_FILE_LOCATION
@@ -1037,7 +1054,12 @@ def reload_sql_id_pepper() -> None:
 
 
 @lru_cache(maxsize=32)
-def _derive_material(password_bytes: bytes, pepper_bytes: bytes, layout: SqlIdLayout) -> tuple[tuple[bytes, ...], bytes]:
+def _derive_material(
+    password_bytes: bytes,
+    pepper_bytes: bytes,
+    domain_salt_bytes: bytes,
+    layout: SqlIdLayout,
+) -> tuple[tuple[bytes, ...], bytes]:
     """Derive layout-specific Feistel round keys and validation-tag key."""
     root_key = hmac.new(
         password_bytes,
@@ -1045,7 +1067,7 @@ def _derive_material(password_bytes: bytes, pepper_bytes: bytes, layout: SqlIdLa
             b"xctx-sql-id-root-v4:"
             + layout.domain_label()
             + b":salt:"
-            + _DOMAIN_SALT
+            + domain_salt_bytes
             + b":pepper:"
             + pepper_bytes
         ),
@@ -1083,7 +1105,10 @@ def _key_material(layout: SqlIdLayout = DEFAULT_LAYOUT) -> tuple[tuple[bytes, ..
     """Return configured key material for the fixed layout or raise an error."""
     if layout != DEFAULT_LAYOUT or not _registry_is_sane():
         raise _ConfigError("bad_config", "invalid sql_id_library layout")
-    return _derive_material(_password_bytes(), _pepper_bytes(), layout)
+    domain_salt_bytes = _domain_salt_bytes()
+    password_bytes = _password_bytes()
+    pepper_bytes = _pepper_bytes()
+    return _derive_material(password_bytes, pepper_bytes, domain_salt_bytes, layout)
 
 
 def is_configured() -> bool:

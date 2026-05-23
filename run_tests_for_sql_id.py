@@ -27,8 +27,27 @@ TEST_DIR = Path(__file__).resolve().parent
 TEST_CONF_DIR = TEST_DIR / "conf"
 TEST_PEPPER_PATH = TEST_DIR / "test_sql_id_pepper.key"
 os.environ.setdefault("XCTX_ID_PASSWORD", TEST_PASSWORD)
+os.environ["XCTX_DEMO_ALLOW_BUNDLED_DOMAIN_SALT"] = "1"
 
 import sql_id_library as sid  # noqa: E402  - env default is set before import
+
+
+@contextmanager
+def patched_env_var(name: str, value: str | None):
+    """Temporarily patch one environment variable."""
+    old_present = name in os.environ
+    old_value = os.environ.get(name)
+    try:
+        if value is None:
+            os.environ.pop(name, None)
+        else:
+            os.environ[name] = value
+        yield
+    finally:
+        if old_present and old_value is not None:
+            os.environ[name] = old_value
+        else:
+            os.environ.pop(name, None)
 
 
 def write_test_pepper(path: Path, value: str = TEST_PEPPER_HEX, mode: int = 0o400) -> None:
@@ -41,19 +60,8 @@ def write_test_pepper(path: Path, value: str = TEST_PEPPER_HEX, mode: int = 0o40
 @contextmanager
 def patched_password(value: str | None):
     """Temporarily patch XCTX_ID_PASSWORD for tests."""
-    old_present = sid.ENV_PASSWORD_NAME in os.environ
-    old_value = os.environ.get(sid.ENV_PASSWORD_NAME)
-    try:
-        if value is None:
-            os.environ.pop(sid.ENV_PASSWORD_NAME, None)
-        else:
-            os.environ[sid.ENV_PASSWORD_NAME] = value
+    with patched_env_var(sid.ENV_PASSWORD_NAME, value):
         yield
-    finally:
-        if old_present and old_value is not None:
-            os.environ[sid.ENV_PASSWORD_NAME] = old_value
-        else:
-            os.environ.pop(sid.ENV_PASSWORD_NAME, None)
 
 
 @contextmanager
@@ -101,6 +109,7 @@ class SqlIdLibraryTests(unittest.TestCase):
         self.assertEqual(sid.TOTAL_BITS, 128)
         self.assertEqual(sid.HEX_CHARS, 32)
         self.assertEqual(sid.SUPPORTED_HEX_LENGTHS, (32,))
+        self.assertEqual(sid.DEMO_ALLOW_BUNDLED_DOMAIN_SALT_ENV, "XCTX_DEMO_ALLOW_BUNDLED_DOMAIN_SALT")
         self.assertEqual(sid.ISSUE_VERSION, 2)
         self.assertEqual(sid.RESERVED_VERSION, 7)
         self.assertEqual(sid.NO_LABEL, 0)
@@ -572,6 +581,48 @@ class SqlIdLibraryTests(unittest.TestCase):
         with patched_password("0123456789abcdef" * 2):
             self.assertTrue(sid.is_configured())
             self.assertIsNotNone(sid.id_to_hex(1))
+
+    def test_bundled_domain_salt_requires_demo_override(self) -> None:
+        self.assertEqual(sid.DOMAIN_SALT_HEX, sid.BUNDLED_DOMAIN_SALT_HEX)
+        self.assertTrue(sid.is_configured())
+
+        with patched_env_var(sid.DEMO_ALLOW_BUNDLED_DOMAIN_SALT_ENV, None):
+            self.assertFalse(sid.is_configured())
+            self.assertIsNone(sid.id_to_hex(1))
+            result = sid.validate_hex("0" * sid.HEX_CHARS)
+            self.assertFalse(result.ok)
+            self.assertEqual(result.error_code, "bad_config")
+            self.assertIn(sid.DEMO_ALLOW_BUNDLED_DOMAIN_SALT_ENV, result.error or "")
+
+            missing_pepper_path = TEST_DIR / "missing_for_salt_order.key"
+            missing_pepper_path.unlink(missing_ok=True)
+            sid.configure_sql_id({"pepper_file_location": str(missing_pepper_path)})
+            result = sid.validate_hex("0" * sid.HEX_CHARS)
+            self.assertFalse(result.ok)
+            self.assertEqual(result.error_code, "bad_config")
+            self.assertIn(sid.DEMO_ALLOW_BUNDLED_DOMAIN_SALT_ENV, result.error or "")
+            sid.configure_sql_id({"pepper_file_location": str(TEST_PEPPER_PATH)})
+
+        with patched_env_var(sid.DEMO_ALLOW_BUNDLED_DOMAIN_SALT_ENV, "1"):
+            self.assertTrue(sid.is_configured())
+            self.assertIsNotNone(sid.id_to_hex(1))
+
+    def test_private_domain_salt_does_not_require_demo_override(self) -> None:
+        private_salt_hex = "1234567890abcdef" * 4
+        old_domain_salt_hex = sid.DOMAIN_SALT_HEX
+        old_domain_salt = sid._DOMAIN_SALT
+        try:
+            sid.DOMAIN_SALT_HEX = private_salt_hex
+            sid._DOMAIN_SALT = bytes.fromhex(private_salt_hex)
+            sid._derive_material.cache_clear()
+
+            with patched_env_var(sid.DEMO_ALLOW_BUNDLED_DOMAIN_SALT_ENV, None):
+                self.assertTrue(sid.is_configured())
+                self.assertIsNotNone(sid.id_to_hex(1))
+        finally:
+            sid.DOMAIN_SALT_HEX = old_domain_salt_hex
+            sid._DOMAIN_SALT = old_domain_salt
+            sid._derive_material.cache_clear()
 
     def test_pepper_file_config_errors_are_specific(self) -> None:
         cases = [

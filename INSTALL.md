@@ -23,10 +23,13 @@ For deployed public IDs, replace `DOMAIN_SALT_HEX` near the top of
 python -c "import secrets; print(secrets.token_hex(32))"
 ```
 
-The bundled salt is public and is accepted by the library, but changing it is
-strongly recommended for public-ID deployment hardening. Treat the salt as one
-of three independent key inputs, alongside `XCTX_ID_PASSWORD` and the pepper
-file.
+The bundled salt is public and is rejected during normal library use. Replace it
+before deployment. The demo and tests set `XCTX_DEMO_ALLOW_BUNDLED_DOMAIN_SALT=1`
+so sample IDs can still be generated with the bundled salt. Do not set that
+environment variable for deployed application processes.
+
+Treat the salt as one of three independent key inputs, alongside
+`XCTX_ID_PASSWORD` and the pepper file.
 
 Do not reuse the salt as `XCTX_ID_PASSWORD` or the pepper. Generate all values
 independently.
@@ -108,4 +111,5 @@ Run the developer demo:
 ```
 
 If the demo prints a bundled-salt warning to stderr, the deployment salt has not
-been changed yet.
+been changed yet. Normal library use rejects that bundled salt unless
+`XCTX_DEMO_ALLOW_BUNDLED_DOMAIN_SALT=1` is set for demo/test use.
