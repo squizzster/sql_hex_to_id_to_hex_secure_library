@@ -4,7 +4,7 @@
 Run:
     ./bin_demo/sql_id_demo_for_dev.py
     ./bin_demo/sql_id_demo_for_dev.py --int_id 1
-    ./bin_demo/sql_id_demo_for_dev.py --int_id 1 --label users
+    ./bin_demo/sql_id_demo_for_dev.py --int_id 1 --label repair
     ./bin_demo/sql_id_demo_for_dev.py --hex_id 65a5cb411fa554a0
 
 For real applications, set XCTX_ID_PASSWORD with a strong secret:
@@ -26,11 +26,11 @@ from pathlib import Path
 DEMO_HARD_CODED_PASSWORD = "demo-hard-coded-secret-" + ("0123456789abcdef" * 4)
 DEMO_HARD_CODED_PEPPER_HEX = "abcdef0123456789" * 4
 DEMO_BUNDLED_DOMAIN_SALT_HEX = "0b91b4e8fd74bcb256a19d188c83470a7b75a4897babb252e54b6eb8f8bb392d"
-DEMO_LABELS = {"users": 1, "plans": 2, "repair": 3}
 USING_DEMO_HARD_CODED_PASSWORD = False
 USING_DEMO_HARD_CODED_PEPPER = False
 WARNED_BUNDLED_DOMAIN_SALT = False
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_DEMO_CONFIG_PATH = PROJECT_ROOT / "conf" / "test_sql_id_config.yaml"
 DEMO_PEPPER_PATH = Path("/tmp/sql_id_library_demo_pepper_please_create_your_own_and_delete_me.key")
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
@@ -146,12 +146,13 @@ def build_parser() -> argparse.ArgumentParser:
             "Examples:\n"
             "  ./bin_demo/sql_id_demo_for_dev.py\n"
             "  ./bin_demo/sql_id_demo_for_dev.py --int_id 1\n"
-            "  ./bin_demo/sql_id_demo_for_dev.py --int_id 1 --label users\n"
+            "  ./bin_demo/sql_id_demo_for_dev.py --int_id 1 --label repair\n"
             "  ./bin_demo/sql_id_demo_for_dev.py --config-file ./conf/test_sql_id_config.yaml --int_id 1 --label repair\n"
             "  ./bin_demo/sql_id_demo_for_dev.py --hex_id 65a5cb411fa554a0\n"
-            "  ./bin_demo/sql_id_demo_for_dev.py --hex_id 65a5cb411fa554a0 --label users\n"
+            "  ./bin_demo/sql_id_demo_for_dev.py --hex_id 65a5cb411fa554a0 --label repair\n"
             "  ./bin_demo/sql_id_demo_for_dev.py --strict-config --int_id 1\n\n"
-            "Demo label names are users=1, plans=2, repair=3. Numeric labels "
+            "Demo labels are loaded from ./conf/test_sql_id_config.yaml: "
+            "dry_run=1, plan=2, execute=3, enquire=4, repair=5. Numeric labels "
             "1..30 also work. Set XCTX_ID_PASSWORD for stable results across "
             "separate commands."
         ),
@@ -258,15 +259,15 @@ def show_default_demo() -> None:
     show_round_trip(123_456_789)
 
     print("Labeled public ID:")
-    show_round_trip(123_456_789, label="users")
+    show_round_trip(123_456_789, label="repair")
 
     print("Type enforcement:")
-    user_hex = id_to_hex_label(42, "users")
-    assert user_hex is not None
-    print(f"users:42 public ID:            {user_hex}")
-    print(f"hex_to_id(users ID):           {hex_to_id(user_hex)}")
-    print(f"hex_to_id_label(..., users):   {hex_to_id_label(user_hex, 'users')}")
-    print(f"hex_to_id_label(..., repair):  {hex_to_id_label(user_hex, 'repair')}")
+    repair_hex = id_to_hex_label(42, "repair")
+    assert repair_hex is not None
+    print(f"repair:42 public ID:           {repair_hex}")
+    print(f"hex_to_id(repair ID):          {hex_to_id(repair_hex)}")
+    print(f"hex_to_id_label(..., repair):  {hex_to_id_label(repair_hex, 'repair')}")
+    print(f"hex_to_id_label(..., plan):    {hex_to_id_label(repair_hex, 'plan')}")
     print()
 
     print("Tamper check:")
@@ -282,10 +283,10 @@ def show_default_demo() -> None:
     print("CLI commands")
     print("------------")
     print("  ./bin_demo/sql_id_demo_for_dev.py --int_id 1")
-    print("  ./bin_demo/sql_id_demo_for_dev.py --int_id 1 --label users")
+    print("  ./bin_demo/sql_id_demo_for_dev.py --int_id 1 --label repair")
     print("  ./bin_demo/sql_id_demo_for_dev.py --config-file ./conf/test_sql_id_config.yaml --int_id 1 --label repair")
     print("  ./bin_demo/sql_id_demo_for_dev.py --hex_id \"<public_hex>\"")
-    print("  ./bin_demo/sql_id_demo_for_dev.py --hex_id \"<public_hex>\" --label users")
+    print("  ./bin_demo/sql_id_demo_for_dev.py --hex_id \"<public_hex>\" --label repair")
     print("  ./bin_demo/sql_id_demo_for_dev.py --help")
 
 
@@ -329,11 +330,13 @@ def decode_cli(public_hex: str, *, label: str | int | None, details: bool) -> No
 
 
 def main(argv: Sequence[str] | None = None) -> None:
-    configure_sql_id({"labels": DEMO_LABELS})
     parser = build_parser()
     args = parser.parse_args(argv)
-    if args.config_file is not None:
-        load_sql_id_config_from_file(args.config_file)
+    config_path = Path(args.config_file) if args.config_file is not None else DEFAULT_DEMO_CONFIG_PATH
+    try:
+        load_sql_id_config_from_file(config_path)
+    except ValueError as exc:
+        raise SystemExit(f"could not load SQL ID demo config {config_path}: {exc}") from exc
     warn_if_using_bundled_domain_salt()
     ensure_demo_config(strict=args.strict_config)
     label = parse_label(args.label)

@@ -424,18 +424,20 @@ It does not mean access granted.
 ```bash
 ./bin_demo/sql_id_demo_for_dev.py
 ./bin_demo/sql_id_demo_for_dev.py --int_id 1
-./bin_demo/sql_id_demo_for_dev.py --int_id 1 --label users
+./bin_demo/sql_id_demo_for_dev.py --int_id 1 --label repair
 ./bin_demo/sql_id_demo_for_dev.py --config-file ./conf/test_sql_id_config.yaml --int_id 1 --label repair
 ./bin_demo/sql_id_demo_for_dev.py --hex_id "<public_hex>"
-./bin_demo/sql_id_demo_for_dev.py --hex_id "<public_hex>" --label users
+./bin_demo/sql_id_demo_for_dev.py --hex_id "<public_hex>" --label repair
 ```
 
-The demo configures local sample labels:
+The demo loads local sample labels from `./conf/test_sql_id_config.yaml`:
 
 ```text
-users=1
-plans=2
-repair=3
+dry_run=1
+plan=2
+execute=3
+enquire=4
+repair=5
 ```
 
 Applications should configure their own pepper path and label registry at startup.
