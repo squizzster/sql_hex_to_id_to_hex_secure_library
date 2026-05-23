@@ -91,11 +91,15 @@ replacing `_v1` with `_vN` before the extension. Version 2, for example,
 requires `SQL_ID_LIBRARY_DOMAIN_SALT_HEX_v2`,
 `SQL_ID_LIBRARY_PASSWORD_HEX_v2`, and a `_v2` pepper file.
 
-New IDs always use the highest fully configured version. That latest configured
-version is always accepted for decoding. `allowed_versions` controls which
-older configured versions remain accepted. A higher version with a versioned
-environment input present but incomplete is treated as an incomplete rotation
-and fails closed until completed or removed.
+From the library's perspective, increasing the version should rarely, if ever,
+be necessary. Treat a new version as a serious operational decision, typically
+reserved for suspected compromise, secret exposure, or another security failure
+that requires key-material rotation. New IDs always use the highest fully
+configured version. That latest configured version is always accepted for
+decoding. `allowed_versions` controls which older configured versions remain
+accepted. A higher version with a versioned environment input present but
+incomplete is treated as an incomplete rotation and fails closed until completed
+or removed.
 
 The domain salt is a public-ID deployment hardening value. Set
 `SQL_ID_LIBRARY_DOMAIN_SALT_HEX_v1` to a deployment-specific random hex value. The
@@ -341,6 +345,7 @@ For bearer-token uses, generate independent random tokens of at least 128 bits.
 - `hex_to_parts()` returns `(label_id, label_name, range_class, tag_bits, version, integer_id)` for diagnostics.
 - `configure_sql_id()` validates the pepper path, allowed version list, and/or full local label registry before atomically replacing configured values.
 - New IDs use the highest fully configured version among `1..6`.
+- Increasing the version should be rare and treated as a serious security-driven rotation decision.
 - The latest configured version is always accepted; `allowed_versions` controls older configured versions.
 - A higher version with partial environment-selected key material fails closed until completed or removed.
 - Versioned environment variables use `SQL_ID_LIBRARY_DOMAIN_SALT_HEX_vN` and `SQL_ID_LIBRARY_PASSWORD_HEX_vN`.

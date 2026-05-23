@@ -78,8 +78,12 @@ layer according to the user and environment that actually run the process.
 
 Changing `SQL_ID_LIBRARY_DOMAIN_SALT_HEX_v1`, `SQL_ID_LIBRARY_PASSWORD_HEX_v1`, or the
 pepper after public IDs have been issued makes those existing public IDs stop
-decoding. To rotate key material without invalidating every older ID at once,
-create the next exact version instead: `SQL_ID_LIBRARY_DOMAIN_SALT_HEX_v2`,
+decoding. From the library's perspective, increasing the version should rarely,
+if ever, be necessary. Treat a new version as a serious operational decision,
+typically reserved for suspected compromise, secret exposure, or another
+security failure that requires key-material rotation. To rotate key material
+without invalidating every older ID at once, create the next exact version
+instead: `SQL_ID_LIBRARY_DOMAIN_SALT_HEX_v2`,
 `SQL_ID_LIBRARY_PASSWORD_HEX_v2`, and a matching `_v2` pepper file. New IDs use
 the highest fully configured version. The latest configured version is always
 accepted; `allowed_versions` controls which older configured versions remain

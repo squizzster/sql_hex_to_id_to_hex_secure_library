@@ -55,14 +55,17 @@ python -c "import secrets; print(secrets.token_hex(32))" > ~/.sql_hex_id_pepper_
 chmod 0400 ~/.sql_hex_id_pepper_file_v1.key
 ```
 
-The library supports exact versions `1..6`. To create a later version, configure
-all three matching inputs, for example `SQL_ID_LIBRARY_DOMAIN_SALT_HEX_v2`,
-`SQL_ID_LIBRARY_PASSWORD_HEX_v2`, and a `_v2` pepper file. New IDs always use
-the highest fully configured version. That latest version is always accepted for
-decode; `allowed_versions` controls which older configured versions remain
-accepted. A higher version with a versioned environment input present but
-incomplete is treated as an incomplete rotation and fails closed until completed
-or removed.
+The library supports exact versions `1..6`. From the library's perspective,
+increasing the version should rarely, if ever, be necessary. Treat a new version
+as a serious operational decision, typically reserved for suspected compromise,
+secret exposure, or another security failure that requires key-material
+rotation. To create a later version, configure all three matching inputs, for
+example `SQL_ID_LIBRARY_DOMAIN_SALT_HEX_v2`, `SQL_ID_LIBRARY_PASSWORD_HEX_v2`,
+and a `_v2` pepper file. New IDs always use the highest fully configured
+version. That latest version is always accepted for decode; `allowed_versions`
+controls which older configured versions remain accepted. A higher version with
+a versioned environment input present but incomplete is treated as an incomplete
+rotation and fails closed until completed or removed.
 
 Changing the salt, runtime secret, or pepper after public IDs have been issued makes
 those existing public IDs stop decoding.
