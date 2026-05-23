@@ -53,12 +53,14 @@ def patched_env_var(name: str, value: str | None):
             os.environ.pop(name, None)
         else:
             os.environ[name] = value
+        sid.reload_sql_id_versions()
         yield
     finally:
         if old_present and old_value is not None:
             os.environ[name] = old_value
         else:
             os.environ.pop(name, None)
+        sid.reload_sql_id_versions()
 
 
 def write_test_pepper(path: Path, value: str = TEST_PEPPER_HEX, mode: int = 0o400, *, newline: bool = True) -> None:
@@ -1127,6 +1129,7 @@ class TestSqlIdLibrary(unittest.TestCase):
         pepper_v2_path = self.test_dir / "test_sql_id_pepper_v2.key"
         write_test_pepper(pepper_v2_path, OTHER_TEST_PEPPER_HEX)
         try:
+            sid.reload_sql_id_versions()
             self.assertEqual(sid.configured_issue_version(), 2)
             self.assertEqual(sid.allowed_versions(), (1, 2))
             version_2_hex = self.assert_public_hex(sid.id_to_hex(123))
@@ -1153,6 +1156,31 @@ class TestSqlIdLibrary(unittest.TestCase):
             pepper_v2_path.chmod(0o600) if pepper_v2_path.exists() else None
             pepper_v2_path.unlink(missing_ok=True)
             sid.configure_sql_id({"allowed_versions": sorted(sid.DEFAULT_ALLOWED_VERSIONS)})
+
+    def test_version_discovery_is_cached_until_reloaded(self) -> None:
+        version_1_hex = self.assert_public_hex(sid.id_to_hex(123))
+
+        os.environ["SQL_ID_LIBRARY_PASSWORD_HEX_v2"] = OTHER_TEST_PASSWORD
+        os.environ["SQL_ID_LIBRARY_DOMAIN_SALT_HEX_v2"] = OTHER_TEST_DOMAIN_SALT_HEX
+        pepper_v2_path = self.test_dir / "test_sql_id_pepper_v2.key"
+        write_test_pepper(pepper_v2_path, OTHER_TEST_PEPPER_HEX)
+        try:
+            self.assertEqual(sid.configured_issue_version(), 1)
+            self.assertEqual(sid.allowed_versions(), (1,))
+            self.assertEqual(sid.hex_to_id(version_1_hex), 123)
+
+            sid.reload_sql_id_versions()
+            self.assertEqual(sid.configured_issue_version(), 2)
+            self.assertEqual(sid.allowed_versions(), (1, 2))
+            version_2_hex = self.assert_public_hex(sid.id_to_hex(123))
+            self.assertNotEqual(version_1_hex, version_2_hex)
+            self.assertEqual(sid.hex_to_id(version_2_hex), 123)
+        finally:
+            os.environ.pop("SQL_ID_LIBRARY_PASSWORD_HEX_v2", None)
+            os.environ.pop("SQL_ID_LIBRARY_DOMAIN_SALT_HEX_v2", None)
+            pepper_v2_path.chmod(0o600) if pepper_v2_path.exists() else None
+            pepper_v2_path.unlink(missing_ok=True)
+            sid.reload_sql_id_versions()
 
     def test_unselected_higher_pepper_files_are_not_probed_per_request(self) -> None:
         pepper_v2_path = self.test_dir / "test_sql_id_pepper_v2.key"
@@ -1217,6 +1245,7 @@ class TestSqlIdLibrary(unittest.TestCase):
         os.environ["SQL_ID_LIBRARY_PASSWORD_HEX_v2"] = OTHER_TEST_PASSWORD
         os.environ["SQL_ID_LIBRARY_DOMAIN_SALT_HEX_v2"] = OTHER_TEST_DOMAIN_SALT_HEX
         try:
+            sid.reload_sql_id_versions()
             self.assertIsNone(sid.configured_issue_version())
             self.assertEqual(sid.allowed_versions(), ())
             self.assertFalse(sid.is_configured())

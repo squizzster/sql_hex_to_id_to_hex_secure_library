@@ -403,6 +403,7 @@ _ALLOWED_VERSIONS: frozenset[int] = DEFAULT_ALLOWED_VERSIONS
 _LABELS_BY_NAME: Mapping[str, int] = MappingProxyType({})
 _LABEL_NAMES_BY_ID: Mapping[int, str] = MappingProxyType({})
 _CONFIG_FILE_CACHE: dict[Path, Mapping[str, object]] = {}
+_VERSION_STATE_CACHE: _VersionState | _ConfigError | None = None
 
 __all__ = [
     "ACTIVE_DECODE_VERSIONS",
@@ -487,6 +488,7 @@ __all__ = [
     "layout_for_hex_length",
     "load_sql_id_config_from_file",
     "reload_sql_id_pepper",
+    "reload_sql_id_versions",
     "reload_sql_id_config_from_file",
     "sql_decode_id",
     "sql_decode_id_label",
@@ -519,6 +521,15 @@ class _ValidationFailure(ValueError):
         super().__init__(message)
         self.code = code
         self.message = message
+
+
+@dataclass(frozen=True)
+class _VersionState:
+    """Cached complete-version selection for normal encode/decode operations."""
+
+    issue_version: int
+    accepted_versions: frozenset[int]
+    probe_versions: tuple[int, ...]
 
 
 def _registry_is_sane() -> bool:
@@ -810,6 +821,7 @@ def configure_sql_id(config: Mapping[str, object]) -> None:
 
     normalized = _validated_sql_id_config(config)
     with _CONFIG_LOCK:
+        _clear_version_state_cache()
         if PEPPER_FILE_LOCATION_KEY in normalized:
             _PEPPER_FILE_LOCATION = normalized[PEPPER_FILE_LOCATION_KEY]  # type: ignore[assignment]
             _PEPPER_CACHE = {}
@@ -1023,6 +1035,7 @@ def clear_sql_id_config() -> None:
         _LABELS_BY_NAME = MappingProxyType({})
         _LABEL_NAMES_BY_ID = MappingProxyType({})
         _CONFIG_FILE_CACHE.clear()
+        _clear_version_state_cache()
         _derive_material.cache_clear()
 
 
@@ -1050,6 +1063,19 @@ def allowed_versions() -> tuple[int, ...]:
 def _allowed_versions() -> frozenset[int]:
     with _CONFIG_LOCK:
         return _ALLOWED_VERSIONS
+
+
+def _clear_version_state_cache() -> None:
+    """Clear cached version discovery state."""
+    global _VERSION_STATE_CACHE
+
+    _VERSION_STATE_CACHE = None
+
+
+def reload_sql_id_versions() -> None:
+    """Clear cached version discovery so versioned env/config changes are re-read."""
+    with _CONFIG_LOCK:
+        _clear_version_state_cache()
 
 
 def _label_name_for_id(label_id: int) -> str | None:
@@ -1370,6 +1396,7 @@ def reload_sql_id_pepper() -> None:
     with _CONFIG_LOCK:
         _PEPPER_CACHE = {}
         _derive_material.cache_clear()
+        _clear_version_state_cache()
         _pepper_bytes_for_version(_issue_version())
 
 
@@ -1435,8 +1462,8 @@ def _key_material_for_version(version: int, layout: SqlIdLayout = DEFAULT_LAYOUT
     return _derive_material(password_bytes, pepper_bytes, domain_salt_bytes, layout, version)
 
 
-def _issue_version() -> int:
-    """Return the highest fully configured version for new public IDs."""
+def _compute_issue_version() -> int:
+    """Compute the highest fully configured version for new public IDs."""
     saw_any_env_input = False
     for version in range(MAX_VERSION, MIN_VERSION - 1, -1):
         if not _version_has_any_env_input(version):
@@ -1452,9 +1479,9 @@ def _issue_version() -> int:
     raise _ConfigError("bad_config", "no SQL ID version has any configured environment input")
 
 
-def _version_sets_for_decode() -> tuple[frozenset[int], tuple[int, ...]]:
-    """Return accepted versions and safe probe versions for decode."""
-    latest_version = _issue_version()
+def _compute_version_state() -> _VersionState:
+    """Compute complete accepted and probe versions for normal operations."""
+    latest_version = _compute_issue_version()
     allowed = _allowed_versions()
     complete_versions = {latest_version}
     for version in ACTIVE_DECODE_VERSIONS:
@@ -1468,7 +1495,42 @@ def _version_sets_for_decode() -> tuple[frozenset[int], tuple[int, ...]]:
             continue
         complete_versions.add(version)
     accepted_versions = (complete_versions & allowed) | {latest_version}
-    return frozenset(accepted_versions), tuple(sorted(complete_versions, reverse=True))
+    return _VersionState(
+        issue_version=latest_version,
+        accepted_versions=frozenset(accepted_versions),
+        probe_versions=tuple(sorted(complete_versions, reverse=True)),
+    )
+
+
+def _version_state() -> _VersionState:
+    """Return cached version discovery state, or raise its cached config error."""
+    global _VERSION_STATE_CACHE
+
+    with _CONFIG_LOCK:
+        cached = _VERSION_STATE_CACHE
+        if isinstance(cached, _VersionState):
+            return cached
+        if isinstance(cached, _ConfigError):
+            raise _ConfigError(cached.code, cached.message)
+        try:
+            state = _compute_version_state()
+        except _ConfigError as exc:
+            cached_error = _ConfigError(exc.code, exc.message)
+            _VERSION_STATE_CACHE = cached_error
+            raise _ConfigError(cached_error.code, cached_error.message) from exc
+        _VERSION_STATE_CACHE = state
+        return state
+
+
+def _issue_version() -> int:
+    """Return the cached highest fully configured version for new public IDs."""
+    return _version_state().issue_version
+
+
+def _version_sets_for_decode() -> tuple[frozenset[int], tuple[int, ...]]:
+    """Return cached accepted versions and safe probe versions for decode."""
+    state = _version_state()
+    return state.accepted_versions, state.probe_versions
 
 
 def configured_issue_version() -> int | None:

@@ -85,7 +85,9 @@ the highest fully configured version. The latest configured version is always
 accepted; `allowed_versions` controls which older configured versions remain
 accepted. A higher version with a versioned environment input present but
 incomplete is treated as an incomplete rotation and fails closed until completed
-or removed.
+or removed. If a running process intentionally adds or removes versioned
+environment inputs, call `reload_sql_id_versions()` before issuing or decoding
+with the changed version set.
 
 ## 4. Configure SQL ID Settings
 

@@ -48,4 +48,6 @@ The highest fully configured key-material version is always accepted and used
 for new IDs. `allowed_versions` controls which older configured versions remain
 accepted during decode. A higher version with a versioned environment input
 present but incomplete is an incomplete rotation and fails closed until
-completed or removed.
+completed or removed. If a running process intentionally adds or removes
+versioned environment inputs, call `reload_sql_id_versions()` before using the
+changed version set.

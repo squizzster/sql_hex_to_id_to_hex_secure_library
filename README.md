@@ -212,6 +212,16 @@ from sql_id_library import reload_sql_id_config_from_file
 reload_sql_id_config_from_file("./conf/test_sql_id_config.yaml")
 ```
 
+The selected issue/decode version set is also cached after first successful
+discovery. If application logic intentionally adds or removes versioned
+environment inputs while the process is running, call:
+
+```python
+from sql_id_library import reload_sql_id_versions
+
+reload_sql_id_versions()
+```
+
 The pepper file is opened without following symlinks on POSIX systems, then
 validated and read through that same file descriptor. It is cached after first
 successful validation for the configured path. If application logic

@@ -346,9 +346,10 @@ For bearer-token uses, generate independent random tokens of at least 128 bits.
 - Versioned environment variables use `SQL_ID_LIBRARY_DOMAIN_SALT_HEX_vN` and `SQL_ID_LIBRARY_PASSWORD_HEX_vN`.
 - Versioned pepper files are derived from the configured `_v1` path by replacing `_v1` with `_vN`.
 - `load_sql_id_config_from_file()` automatically reuses cached `.json`, `.yaml`, or `.yml` config mappings after the first successful load for a same-stem path.
-- Encoding and decoding use the in-memory config path and label registry; normal ID operations read and cache the configured pepper file but do not read config files.
+- Encoding and decoding use the in-memory config path, label registry, and cached version state; normal ID operations read and cache the selected pepper files but do not read config files.
 - Cached file loads and config installs are protected by the same lock.
 - `reload_sql_id_config_from_file()` explicitly re-reads files and refreshes the cache.
+- `reload_sql_id_versions()` explicitly rechecks versioned environment inputs and rebuilds the issue/decode version set.
 - `reload_sql_id_pepper()` explicitly re-reads the currently configured pepper file and clears derived key-material cache.
 - Pepper file permission and symlink checks are performed when the pepper is loaded or explicitly reloaded.
 - YAML loading requires optional PyYAML; unavailable YAML support raises `ValueError`.
