@@ -1232,24 +1232,13 @@ def _versioned_pepper_path(main_path: Path, version: int) -> Path:
     return main_path.with_name(f"{match.group(1)}_v{version}{match.group(3)}")
 
 
-def _path_exists_no_follow(path: Path) -> bool:
-    """Return whether a path itself exists, including symlinks."""
-    try:
-        path.lstat()
-        return True
-    except FileNotFoundError:
-        return False
-    except OSError as exc:
-        raise _ConfigError("unreadable_pepper_file", f"could not stat pepper file: {exc}") from exc
-
-
-def _version_has_any_key_input(version: int) -> bool:
-    """Return True when any key input exists for one exact version."""
+def _version_has_any_env_input(version: int) -> bool:
+    """Return True when a version is selected by one of its env inputs."""
     if _versioned_env_name(ENV_PASSWORD_BASE_NAME, version) in os.environ:
         return True
     if _versioned_env_name(ENV_DOMAIN_SALT_BASE_NAME, version) in os.environ:
         return True
-    return _path_exists_no_follow(_versioned_pepper_path(_configured_pepper_path(), version))
+    return False
 
 
 def _validate_pepper_permissions(path: Path, file_stat: os.stat_result) -> None:
@@ -1448,19 +1437,19 @@ def _key_material_for_version(version: int, layout: SqlIdLayout = DEFAULT_LAYOUT
 
 def _issue_version() -> int:
     """Return the highest fully configured version for new public IDs."""
-    saw_any_input = False
+    saw_any_env_input = False
     for version in range(MAX_VERSION, MIN_VERSION - 1, -1):
-        if not _version_has_any_key_input(version):
+        if not _version_has_any_env_input(version):
             continue
-        saw_any_input = True
+        saw_any_env_input = True
         try:
             _key_material_for_version(version, DEFAULT_LAYOUT)
             return version
         except _ConfigError:
             raise
-    if saw_any_input:
+    if saw_any_env_input:
         raise _ConfigError("bad_config", "no SQL ID version is fully configured")
-    raise _ConfigError("bad_config", "no SQL ID version has any configured key input")
+    raise _ConfigError("bad_config", "no SQL ID version has any configured environment input")
 
 
 def _version_sets_for_decode() -> tuple[frozenset[int], tuple[int, ...]]:
@@ -1469,7 +1458,7 @@ def _version_sets_for_decode() -> tuple[frozenset[int], tuple[int, ...]]:
     allowed = _allowed_versions()
     complete_versions = {latest_version}
     for version in ACTIVE_DECODE_VERSIONS:
-        if version == latest_version or not _version_has_any_key_input(version):
+        if version == latest_version or not _version_has_any_env_input(version):
             continue
         try:
             _key_material_for_version(version, DEFAULT_LAYOUT)

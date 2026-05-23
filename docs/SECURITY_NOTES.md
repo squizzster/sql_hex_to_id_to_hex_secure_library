@@ -93,9 +93,9 @@ requires `SQL_ID_LIBRARY_DOMAIN_SALT_HEX_v2`,
 
 New IDs always use the highest fully configured version. That latest configured
 version is always accepted for decoding. `allowed_versions` controls which
-older configured versions remain accepted. A higher version with only some
-inputs present is treated as an incomplete rotation and fails closed until
-completed or removed.
+older configured versions remain accepted. A higher version with a versioned
+environment input present but incomplete is treated as an incomplete rotation
+and fails closed until completed or removed.
 
 The domain salt is a public-ID deployment hardening value. Set
 `SQL_ID_LIBRARY_DOMAIN_SALT_HEX_v1` to a deployment-specific random hex value. The
@@ -342,7 +342,7 @@ For bearer-token uses, generate independent random tokens of at least 128 bits.
 - `configure_sql_id()` validates the pepper path, allowed version list, and/or full local label registry before atomically replacing configured values.
 - New IDs use the highest fully configured version among `1..6`.
 - The latest configured version is always accepted; `allowed_versions` controls older configured versions.
-- A higher version with only partial key material fails closed until completed or removed.
+- A higher version with partial environment-selected key material fails closed until completed or removed.
 - Versioned environment variables use `SQL_ID_LIBRARY_DOMAIN_SALT_HEX_vN` and `SQL_ID_LIBRARY_PASSWORD_HEX_vN`.
 - Versioned pepper files are derived from the configured `_v1` path by replacing `_v1` with `_vN`.
 - `load_sql_id_config_from_file()` automatically reuses cached `.json`, `.yaml`, or `.yml` config mappings after the first successful load for a same-stem path.

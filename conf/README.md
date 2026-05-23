@@ -46,5 +46,6 @@ after public IDs have been issued.
 
 The highest fully configured key-material version is always accepted and used
 for new IDs. `allowed_versions` controls which older configured versions remain
-accepted during decode. A higher version with only some inputs present is an
-incomplete rotation and fails closed until completed or removed.
+accepted during decode. A higher version with a versioned environment input
+present but incomplete is an incomplete rotation and fails closed until
+completed or removed.

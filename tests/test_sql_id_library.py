@@ -1154,6 +1154,33 @@ class TestSqlIdLibrary(unittest.TestCase):
             pepper_v2_path.unlink(missing_ok=True)
             sid.configure_sql_id({"allowed_versions": sorted(sid.DEFAULT_ALLOWED_VERSIONS)})
 
+    def test_unselected_higher_pepper_files_are_not_probed_per_request(self) -> None:
+        pepper_v2_path = self.test_dir / "test_sql_id_pepper_v2.key"
+        write_test_pepper(pepper_v2_path, OTHER_TEST_PEPPER_HEX)
+        original_lstat = Path.lstat
+        lstat_calls: list[Path] = []
+
+        def counting_lstat(path: Path) -> os.stat_result:
+            lstat_calls.append(path)
+            return original_lstat(path)
+
+        try:
+            with mock.patch.object(Path, "lstat", counting_lstat):
+                encoded = self.assert_public_hex(sid.id_to_hex(123))
+
+            expected_encode_lstats = 1 if os.name == "posix" else 0
+            self.assertEqual(len(lstat_calls), expected_encode_lstats)
+            self.assertTrue(all(path.name.endswith("_v1.key") for path in lstat_calls))
+            self.assertEqual(sid.validate_hex(encoded).version, 1)
+
+            lstat_calls.clear()
+            with mock.patch.object(Path, "lstat", counting_lstat):
+                self.assertEqual(sid.hex_to_id(encoded), 123)
+            self.assertEqual(lstat_calls, [])
+        finally:
+            pepper_v2_path.chmod(0o600) if pepper_v2_path.exists() else None
+            pepper_v2_path.unlink(missing_ok=True)
+
     def test_disabled_partial_intermediate_version_does_not_block_decode(self) -> None:
         version_1_hex = self.assert_public_hex(sid.id_to_hex(123))
 

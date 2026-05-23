@@ -60,8 +60,9 @@ all three matching inputs, for example `SQL_ID_LIBRARY_DOMAIN_SALT_HEX_v2`,
 `SQL_ID_LIBRARY_PASSWORD_HEX_v2`, and a `_v2` pepper file. New IDs always use
 the highest fully configured version. That latest version is always accepted for
 decode; `allowed_versions` controls which older configured versions remain
-accepted. A higher version with only some inputs present is treated as an
-incomplete rotation and fails closed until completed or removed.
+accepted. A higher version with a versioned environment input present but
+incomplete is treated as an incomplete rotation and fails closed until completed
+or removed.
 
 Changing the salt, runtime secret, or pepper after public IDs have been issued makes
 those existing public IDs stop decoding.
