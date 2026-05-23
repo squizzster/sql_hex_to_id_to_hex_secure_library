@@ -68,8 +68,8 @@ Secret configuration:
     Each key input uses the same 64..512 hex-character contract. The decoded
     bytes are checked for minimum byte diversity and extreme bit imbalance, then
     normalized to a role-separated SHA-512 digest before key derivation. The
-    pepper file accepts one final line ending from shell redirection but rejects
-    other leading or trailing whitespace.
+    pepper file accepts one final line ending from shell redirection, including
+    after a max-length pepper, but rejects other leading or trailing whitespace.
 
     New IDs always use the highest fully configured version. That latest version
     is always accepted for decoding. Older configured versions are accepted only
@@ -394,7 +394,7 @@ MAX_PUBLIC_HEX_CHARS: Final[int] = HEX_CHARS
 _MAX_PUBLIC_HEX_CHARS: Final[int] = HEX_CHARS
 _MAX_DECIMAL_ID_STRING_CHARS: Final[int] = 32
 _MAX_CONFIG_FILE_BYTES: Final[int] = 2000
-_MAX_PEPPER_FILE_BYTES: Final[int] = MAX_PEPPER_HEX_CHARS
+_MAX_PEPPER_FILE_BYTES: Final[int] = MAX_PEPPER_HEX_CHARS + 2
 
 _CONFIG_LOCK = RLock()
 _PEPPER_FILE_LOCATION: str = DEFAULT_PEPPER_FILE_LOCATION
@@ -635,7 +635,7 @@ def _registry_is_sane() -> bool:
         return False
     if MIN_PEPPER_UNIQUE_BYTES != MIN_KEY_INPUT_UNIQUE_BYTES:
         return False
-    if _MAX_PEPPER_FILE_BYTES != MAX_KEY_INPUT_HEX_CHARS:
+    if _MAX_PEPPER_FILE_BYTES != MAX_KEY_INPUT_HEX_CHARS + 2:
         return False
     if _binomial_two_sided_tail_probability(256, 71) > KEY_INPUT_BIT_BALANCE_MIN_TAIL_PROBABILITY:
         return False
@@ -878,13 +878,26 @@ def _yaml_safe_load_no_duplicate_keys(yaml_module: object, text: str) -> object:
         mapping: dict[object, object] = {}
         for key_node, value_node in node.value:  # type: ignore[attr-defined]
             key = loader.construct_object(key_node, deep=deep)  # type: ignore[attr-defined]
-            if key in mapping:
+            try:
+                key_is_duplicate = key in mapping
+            except TypeError as exc:
+                raise ValueError(f"unhashable key in YAML config file: {key!r}") from exc
+            if key_is_duplicate:
                 raise ValueError(f"duplicate key in YAML config file: {key!r}")
             mapping[key] = loader.construct_object(value_node, deep=deep)  # type: ignore[attr-defined]
         return mapping
 
     UniqueKeyLoader.add_constructor(default_mapping_tag, construct_mapping)
     return yaml_load(text, Loader=UniqueKeyLoader)
+
+
+def _yaml_config_available() -> bool:
+    """Return whether optional YAML config support can be imported."""
+    try:
+        import yaml  # noqa: F401  # type: ignore[import-not-found]
+    except ImportError:
+        return False
+    return True
 
 
 def _labels_from_loaded_data(data: object) -> dict[str, int]:
@@ -934,8 +947,11 @@ def _candidate_config_paths(path: Path) -> tuple[Path, ...]:
     if suffix not in {".json", ".yaml", ".yml"}:
         raise ValueError("config file must use .json, .yaml, or .yml")
 
+    include_yaml_candidates = suffix in {".yaml", ".yml"} or _yaml_config_available()
     candidates = []
     for candidate_suffix in (".json", ".yaml", ".yml"):
+        if candidate_suffix in {".yaml", ".yml"} and not include_yaml_candidates:
+            continue
         candidate = path.with_suffix(candidate_suffix)
         try:
             exists = candidate.exists()
@@ -979,7 +995,12 @@ def _load_one_config_file(path: Path) -> dict[str, object]:
                 import yaml  # type: ignore[import-not-found]
             except ImportError as exc:
                 raise ValueError("YAML config files require the optional PyYAML package") from exc
-            data = _yaml_safe_load_no_duplicate_keys(yaml, text)
+            try:
+                data = _yaml_safe_load_no_duplicate_keys(yaml, text)
+            except yaml.YAMLError as exc:  # type: ignore[attr-defined]
+                raise ValueError(f"invalid YAML config file: {exc}") from exc
+            except TypeError as exc:
+                raise ValueError(f"invalid YAML config file: {exc}") from exc
         else:
             raise ValueError("config file must use .json, .yaml, or .yml")
     except OSError as exc:
@@ -1010,9 +1031,10 @@ def load_sql_id_config_from_file(path: str | os.PathLike[str]) -> None:
          "allowed_versions": [1, 2, 3, 4, 5, 6],
          "labels": {"dry_run": 1, "plan": 2}}
 
-    If same-stem files exist in more than one supported format, all available
-    .json, .yaml, and .yml files are loaded and must normalize to the exact
-    same SQL ID config. Each file must be no larger than 2000 bytes.
+    If same-stem files exist in more than one loadable format, they are loaded
+    and must normalize to the exact same SQL ID config. Same-stem YAML files are
+    cross-checked when PyYAML is installed; explicitly loading YAML without
+    PyYAML raises ValueError. Each file must be no larger than 2000 bytes.
 
     File content is cached automatically by same-stem path after the first
     successful load. Later calls for the same cache key reuse the cached
@@ -1338,7 +1360,10 @@ def _read_pepper_bytes_from_path(path: Path) -> bytes:
             raise _ConfigError("unreadable_pepper_file", f"could not stat pepper file: {exc}") from exc
         _validate_pepper_permissions(path, file_stat)
         if file_stat.st_size > _MAX_PEPPER_FILE_BYTES:
-            raise _ConfigError("pepper_too_long", f"pepper file must be at most {_MAX_PEPPER_FILE_BYTES} bytes")
+            raise _ConfigError(
+                "pepper_too_long",
+                f"pepper file must be at most {_MAX_PEPPER_FILE_BYTES} bytes including an optional final CRLF",
+            )
 
         try:
             raw_data = os.read(fd, _MAX_PEPPER_FILE_BYTES + 1)
@@ -1351,7 +1376,10 @@ def _read_pepper_bytes_from_path(path: Path) -> bytes:
             pass
 
     if len(raw_data) > _MAX_PEPPER_FILE_BYTES:
-        raise _ConfigError("pepper_too_long", f"pepper file must be at most {_MAX_PEPPER_FILE_BYTES} bytes")
+        raise _ConfigError(
+            "pepper_too_long",
+            f"pepper file must be at most {_MAX_PEPPER_FILE_BYTES} bytes including an optional final CRLF",
+        )
     try:
         text = raw_data.decode("ascii")
     except UnicodeDecodeError as exc:
@@ -1811,6 +1839,8 @@ def _public_hex_for_length_error(value: str) -> str | None:
 
 def _decode_public_hex(value: object, *, expected_label: int | None) -> SqlIdValidation:
     """Decode and validate a public hex ID, optionally requiring one exact label."""
+    authenticated_metadata: dict[str, int] = {}
+
     if not isinstance(value, str):
         return _validation_error("not_string", "public id must be a hex string")
 
@@ -1840,6 +1870,12 @@ def _decode_public_hex(value: object, *, expected_label: int | None) -> SqlIdVal
             expected_tag = _tag(version, label_id, range_class, id_value, tag_key, DEFAULT_LAYOUT)
             if not _tags_equal(supplied_tag, expected_tag, range_layout):
                 continue
+            authenticated_metadata = {
+                "version": version,
+                "label_id": label_id,
+                "range_class": range_class,
+                "tag_bits": range_layout.tag_bits,
+            }
             if version not in accepted_versions:
                 raise _ValidationFailure("unsupported_version", "public id version is not allowed")
             if label_id == RESERVED_LABEL:
@@ -1870,10 +1906,10 @@ def _decode_public_hex(value: object, *, expected_label: int | None) -> SqlIdVal
             exc.message,
             public_hex=public_hex,
             layout=DEFAULT_LAYOUT,
-            version=locals().get("version"),
-            label_id=locals().get("label_id"),
-            range_class=locals().get("range_class"),
-            tag_bits=locals().get("range_layout").tag_bits if "range_layout" in locals() else None,
+            version=authenticated_metadata.get("version"),
+            label_id=authenticated_metadata.get("label_id"),
+            range_class=authenticated_metadata.get("range_class"),
+            tag_bits=authenticated_metadata.get("tag_bits"),
         )
     except Exception as exc:  # noqa: BLE001 - validation returns a real error, not an exception
         return _validation_error("internal_error", f"internal validation failure: {exc}", public_hex=public_hex, layout=DEFAULT_LAYOUT)

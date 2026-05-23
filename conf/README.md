@@ -26,10 +26,11 @@ load_sql_id_config_from_file("./conf/test_sql_id_config.json")
 load_sql_id_config_from_file("./conf/test_sql_id_config.yaml")
 ```
 
-If same-stem files exist in more than one supported format, every available
+If same-stem files exist in more than one loadable format, every loadable
 same-stem `.json`, `.yaml`, and `.yml` file must normalize to the same SQL ID
 config or loading fails. JSON is supported by the Python standard library. YAML
-requires optional PyYAML.
+requires optional PyYAML, and same-stem YAML files are cross-checked when PyYAML
+is installed.
 
 File-loaded config is cached automatically after the first successful load.
 Later calls to `load_sql_id_config_from_file()` for the same same-stem path

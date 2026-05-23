@@ -43,6 +43,33 @@ os.environ["SQL_ID_LIBRARY_DOMAIN_SALT_HEX_v1"] = TEST_DOMAIN_SALT_HEX
 import sql_id_library as sid  # noqa: E402  - env default is set before import
 
 
+_VERSIONED_SQL_ID_ENV_RE = re.compile(r"^SQL_ID_LIBRARY_[A-Z0-9_]+_v[1-6]$")
+
+
+def _sql_id_versioned_env_names() -> set[str]:
+    names = {name for name in os.environ if _VERSIONED_SQL_ID_ENV_RE.fullmatch(name)}
+    for version in range(sid.MIN_VERSION, sid.MAX_VERSION + 1):
+        names.add(sid._versioned_env_name(sid.ENV_PASSWORD_BASE_NAME, version))
+        names.add(sid._versioned_env_name(sid.ENV_DOMAIN_SALT_BASE_NAME, version))
+    return names
+
+
+def _snapshot_sql_id_versioned_env() -> dict[str, str]:
+    return {name: os.environ[name] for name in _sql_id_versioned_env_names() if name in os.environ}
+
+
+def _clear_sql_id_versioned_env() -> None:
+    for name in _sql_id_versioned_env_names():
+        os.environ.pop(name, None)
+    sid.reload_sql_id_versions()
+
+
+def _restore_sql_id_versioned_env(snapshot: dict[str, str]) -> None:
+    _clear_sql_id_versioned_env()
+    os.environ.update(snapshot)
+    sid.reload_sql_id_versions()
+
+
 @contextmanager
 def patched_env_var(name: str, value: str | None):
     """Temporarily patch one environment variable."""
@@ -90,6 +117,10 @@ def patched_labels(labels: dict[str, int]):
 
 class TestSqlIdLibrary(unittest.TestCase):
     def setUp(self) -> None:
+        self._sql_id_env_snapshot = _snapshot_sql_id_versioned_env()
+        self.addCleanup(_restore_sql_id_versioned_env, self._sql_id_env_snapshot)
+        _clear_sql_id_versioned_env()
+
         self._temp_dir = tempfile.TemporaryDirectory(prefix="sql_id_library_test_")
         self.addCleanup(self._temp_dir.cleanup)
         self.test_dir = Path(self._temp_dir.name)
@@ -589,6 +620,11 @@ class TestSqlIdLibrary(unittest.TestCase):
             other_pepper_path.unlink(missing_ok=True)
 
     def test_cached_label_files_share_same_stem_across_json_and_yaml_paths(self) -> None:
+        try:
+            import yaml  # noqa: F401
+        except ImportError:
+            self.skipTest("PyYAML is not installed")
+
         json_path = self.test_dir / "same_stem_cached_labels.json"
         yaml_path = self.test_dir / "same_stem_cached_labels.yaml"
         json_path.write_text('{"labels": {"dry_run": 1}}\n', encoding="utf-8")
@@ -677,6 +713,26 @@ class TestSqlIdLibrary(unittest.TestCase):
             duplicate_name_path.unlink(missing_ok=True)
             bool_key_path.unlink(missing_ok=True)
 
+    def test_load_sql_id_config_from_yaml_wraps_parse_and_key_type_errors(self) -> None:
+        try:
+            import yaml  # noqa: F401
+        except ImportError:
+            self.skipTest("PyYAML is not installed")
+
+        cases = {
+            "malformed_sql_id_labels.yaml": "labels: [",
+            "unhashable_key_sql_id_labels.yaml": "labels:\n  ? [a, b]\n  : 1\n",
+        }
+        for filename, contents in cases.items():
+            yaml_path = self.test_dir / filename
+            yaml_path.write_text(contents, encoding="utf-8")
+            try:
+                with self.subTest(filename=filename):
+                    with self.assertRaises(ValueError):
+                        sid.load_sql_id_config_from_file(yaml_path)
+            finally:
+                yaml_path.unlink(missing_ok=True)
+
     def test_load_sql_id_config_from_yaml_errors_when_yaml_dependency_is_missing(self) -> None:
         yaml_path = self.test_dir / "no_yaml_dependency_sql_id_labels.yaml"
         yaml_path.write_text("labels:\n  1: dry_run\n", encoding="utf-8")
@@ -695,7 +751,33 @@ class TestSqlIdLibrary(unittest.TestCase):
         finally:
             yaml_path.unlink(missing_ok=True)
 
+    def test_json_config_load_ignores_same_stem_yaml_when_yaml_dependency_is_missing(self) -> None:
+        json_path = self.test_dir / "no_yaml_dependency_sql_id_labels.json"
+        yaml_path = self.test_dir / "no_yaml_dependency_sql_id_labels.yaml"
+        json_path.write_text('{"labels": {"dry_run": 1}}\n', encoding="utf-8")
+        yaml_path.write_text("labels:\n  1: dry_run\n", encoding="utf-8")
+
+        real_import = builtins.__import__
+
+        def fake_import(name: str, *args: object, **kwargs: object) -> object:
+            if name == "yaml":
+                raise ImportError("blocked for test")
+            return real_import(name, *args, **kwargs)
+
+        try:
+            with mock.patch("builtins.__import__", side_effect=fake_import):
+                sid.load_sql_id_config_from_file(json_path)
+                self.assertEqual(sid.available_labels(), {"dry_run": 1})
+        finally:
+            json_path.unlink(missing_ok=True)
+            yaml_path.unlink(missing_ok=True)
+
     def test_load_sql_id_config_from_file_requires_same_stem_files_to_match(self) -> None:
+        try:
+            import yaml  # noqa: F401
+        except ImportError:
+            self.skipTest("PyYAML is not installed")
+
         json_path = self.test_dir / "mismatch_sql_id_labels.json"
         yaml_path = self.test_dir / "mismatch_sql_id_labels.yaml"
         json_path.write_text('{"labels": {"dry_run": 1, "plan": 2}}\n', encoding="utf-8")
@@ -865,7 +947,7 @@ class TestSqlIdLibrary(unittest.TestCase):
                 pepper_path.unlink(missing_ok=True)
                 sid.configure_sql_id({"pepper_file_location": str(self.test_pepper_path)})
 
-    def test_pepper_file_accepts_exact_max_hex_and_rejects_larger_file(self) -> None:
+    def test_pepper_file_accepts_exact_max_hex_with_optional_newline_and_rejects_larger_hex(self) -> None:
         pepper_path = self.test_dir / "max_size_sql_id_pepper_v1.key"
         max_pepper_hex = "00112233445566778899aabbccddeeff" * 16
         try:
@@ -876,9 +958,20 @@ class TestSqlIdLibrary(unittest.TestCase):
 
             write_test_pepper(pepper_path, max_pepper_hex, newline=True)
             sid.reload_sql_id_pepper()
-            self.fail("expected max pepper plus newline to be rejected")
-        except sid._ConfigError as exc:
-            self.assertEqual(exc.code, "pepper_too_long")
+            self.assertTrue(sid.is_configured())
+            self.assertIsNotNone(sid.id_to_hex(1))
+
+            pepper_path.chmod(0o600)
+            pepper_path.write_text(max_pepper_hex + "\r\n", encoding="ascii")
+            pepper_path.chmod(0o400)
+            sid.reload_sql_id_pepper()
+            self.assertTrue(sid.is_configured())
+            self.assertIsNotNone(sid.id_to_hex(1))
+
+            write_test_pepper(pepper_path, max_pepper_hex + "00", newline=False)
+            with self.assertRaises(sid._ConfigError) as exc_info:
+                sid.reload_sql_id_pepper()
+            self.assertEqual(exc_info.exception.code, "pepper_too_long")
         finally:
             pepper_path.chmod(0o600) if pepper_path.exists() else None
             pepper_path.unlink(missing_ok=True)
@@ -1088,6 +1181,10 @@ class TestSqlIdLibrary(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertIsNotNone(result.layout)
         self.assertEqual(result.error_code, "tag_mismatch")
+        self.assertIsNone(result.version)
+        self.assertIsNone(result.label_id)
+        self.assertIsNone(result.range_class)
+        self.assertIsNone(result.tag_bits)
         self.assertIsNone(sid.hex_to_id(value))
 
     def test_single_nibble_tampering_is_rejected(self) -> None:
@@ -1346,6 +1443,10 @@ class TestSqlIdLibrary(unittest.TestCase):
             result = validator(bad_encoded)
             self.assertFalse(result.ok)
             self.assertEqual(result.error_code, "tag_mismatch")
+            self.assertIsNone(result.version)
+            self.assertIsNone(result.label_id)
+            self.assertIsNone(result.range_class)
+            self.assertIsNone(result.tag_bits)
             self.assertIsNone(sid.hex_to_id(bad_encoded))
 
     def test_private_pack_unpack_round_trip(self) -> None:

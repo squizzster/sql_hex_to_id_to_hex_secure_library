@@ -57,10 +57,10 @@ The default pepper path is:
 ```
 
 Create it with `64..512` hex characters. One final line ending from shell
-redirection is accepted; other leading or trailing whitespace is rejected. The
-raw pepper file is capped at 512 bytes, so a max-length pepper must not include
-a trailing newline. The decoded pepper bytes use the same byte-diversity,
-bit-balance, and SHA-512 normalization rules as the salt and runtime secret.
+redirection is accepted, including after a 512-character pepper; other leading
+or trailing whitespace is rejected. The decoded pepper bytes use the same
+byte-diversity, bit-balance, and SHA-512 normalization rules as the salt and
+runtime secret.
 The minimum generator is:
 
 ```bash

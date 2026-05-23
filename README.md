@@ -37,7 +37,8 @@ deployments normally start with version 1:
 Generate each one independently. `SQL_ID_LIBRARY_DOMAIN_SALT_HEX_v1`,
 `SQL_ID_LIBRARY_PASSWORD_HEX_v1`, and the pepper must each provide `64..512` hex
 characters. The pepper file may include one final line ending from shell
-redirection; other leading or trailing whitespace is rejected. The library
+redirection, including after a 512-character pepper; other leading or trailing
+whitespace is rejected. The library
 decodes each value to `32..256` bytes, rejects low byte diversity and extreme
 bit imbalance, then normalizes the accepted bytes to a role-separated SHA-512
 digest before key derivation. This normalization gives every allowed input
@@ -197,13 +198,14 @@ load_sql_id_config_from_file("./conf/test_sql_id_config.yaml")
 
 JSON support uses the Python standard library. YAML support is optional and
 requires PyYAML; if it is unavailable, loading a YAML file raises `ValueError`.
-If same-stem files exist in more than one supported format, for example
+If same-stem files exist in more than one loadable format, for example
 `conf/test_sql_id_config.json` and `conf/test_sql_id_config.yaml`, the loader
-reads every available same-stem `.json`, `.yaml`, and `.yml` file and refuses to
-continue unless they normalize to exactly the same SQL ID config. Each config
-file must be `2000` bytes or smaller. Duplicate file keys, duplicate normalized
-label names, duplicate label IDs, boolean label IDs, and YAML boolean keys are
-rejected.
+reads the loadable same-stem files and refuses to continue unless they normalize
+to exactly the same SQL ID config. Same-stem YAML files are cross-checked when
+PyYAML is installed; JSON loading remains standard-library-only when PyYAML is
+absent. Each config file must be `2000` bytes or smaller. Duplicate file keys,
+duplicate normalized label names, duplicate label IDs, boolean label IDs, and
+YAML boolean keys are rejected.
 
 File-loaded config is cached automatically after the first successful load.
 Later calls to `load_sql_id_config_from_file()` for the same same-stem path
@@ -363,7 +365,7 @@ Typical errors include:
 | `unreadable_pepper_file` | Pepper file could not be read        |
 | `bad_pepper_permissions` | Pepper file permissions are unsafe   |
 | `pepper_too_short`    | Pepper hex is shorter than 64 chars     |
-| `pepper_too_long`     | Pepper file or hex is longer than 512 chars |
+| `pepper_too_long`     | Pepper hex is longer than 512 chars after final newline stripping, or raw file is too large |
 | `invalid_pepper_hex`  | Pepper file did not contain valid hex   |
 | `low_diversity_pepper` | Pepper bytes had too little diversity  |
 | `low_bit_balance_pepper` | Pepper bits were implausibly imbalanced |
@@ -394,10 +396,9 @@ export SQL_ID_LIBRARY_PASSWORD_HEX_v1="$(python -c 'import secrets; print(secret
 ```
 
 Use `64..512` hex characters for the pepper. One final line ending from shell
-redirection is accepted; other leading or trailing whitespace is rejected. The
-raw pepper file is capped at 512 bytes, so a max-length pepper must not include
-a trailing newline. The same hex, byte-diversity, bit-balance, and SHA-512
-normalization rules apply to `SQL_ID_LIBRARY_DOMAIN_SALT_HEX_v1`,
+redirection is accepted, including after a 512-character pepper; other leading
+or trailing whitespace is rejected. The same hex, byte-diversity, bit-balance,
+and SHA-512 normalization rules apply to `SQL_ID_LIBRARY_DOMAIN_SALT_HEX_v1`,
 `SQL_ID_LIBRARY_PASSWORD_HEX_v1`, and the pepper:
 
 ```bash

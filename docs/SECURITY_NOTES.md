@@ -122,10 +122,10 @@ python -c "import secrets; print(secrets.token_hex(32))"
 ```
 
 The pepper file must contain `64..512` hex characters. One final line ending
-from shell redirection is accepted; other leading or trailing whitespace is
-rejected. The library validates and normalizes the decoded `32..256` pepper
-bytes before key derivation. The raw pepper file is capped at 512 bytes, so a
-max-length pepper must not include a trailing newline. The default path is:
+from shell redirection is accepted, including after a 512-character pepper;
+other leading or trailing whitespace is rejected. The library validates and
+normalizes the decoded `32..256` pepper bytes before key derivation. The default
+path is:
 
 ```text
 ~/.sql_hex_id_pepper_file_v1.key
@@ -163,8 +163,8 @@ All three key inputs use the same source contract:
 ```
 
 For the pepper file, one final line ending from shell redirection is accepted
-before this contract is applied. Other leading or trailing whitespace is
-rejected.
+before this contract is applied, including after a max-length pepper. Other
+leading or trailing whitespace is rejected.
 
 The decoded bytes are validated before any hashing. They must have at least
 eight unique byte values and must not have an implausibly extreme bit balance.
@@ -359,8 +359,9 @@ For bearer-token uses, generate independent random tokens of at least 128 bits.
 - `reload_sql_id_versions()` explicitly rechecks versioned environment inputs and rebuilds the issue/decode version set.
 - `reload_sql_id_pepper()` explicitly re-reads the currently configured pepper file and clears derived key-material cache.
 - Pepper file permission and symlink checks are performed when the pepper is loaded or explicitly reloaded.
-- YAML loading requires optional PyYAML; unavailable YAML support raises `ValueError`.
-- Same-stem `.json`, `.yaml`, and `.yml` files are cross-checked and must match exactly after normalization.
+- YAML loading requires optional PyYAML; explicitly loading YAML without it raises `ValueError`.
+- Same-stem `.json`, `.yaml`, and `.yml` files are cross-checked and must
+  match exactly after normalization when the formats are loadable.
 - Config files larger than 2000 bytes are rejected.
 - Duplicate JSON/YAML keys, duplicate normalized names, duplicate IDs, boolean label IDs, and YAML boolean keys are rejected.
 - Missing, unreadable, malformed, low-diversity, bit-imbalanced, overlong, underlong, or unsafe-permission pepper files fail closed.
