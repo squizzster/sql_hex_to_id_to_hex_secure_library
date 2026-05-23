@@ -5,9 +5,9 @@ Run:
     ./bin_demo/sql_id_demo_for_dev.py
     ./bin_demo/sql_id_demo_for_dev.py --int_id 1
     ./bin_demo/sql_id_demo_for_dev.py --int_id 1 --label repair
-    ./bin_demo/sql_id_demo_for_dev.py --hex_id 8ca02d86446ce81a3339fdd1403f794a
+    ./bin_demo/sql_id_demo_for_dev.py --hex_id 330293be278aae686fb42aae757556dd
 
-For real applications, set XCTX_ID_PASSWORD with a strong secret:
+For real applications, set XCTX_ID_PASSWORD with a strong hex secret:
     export XCTX_ID_PASSWORD="$(python -c 'import secrets; print(secrets.token_hex(32))')"
 
 Also create a pepper file and replace DOMAIN_SALT_HEX in sql_id_library.py for
@@ -24,7 +24,7 @@ from collections.abc import Sequence
 from pathlib import Path
 
 
-DEMO_HARD_CODED_PASSWORD = "demo-hard-coded-secret-" + ("0123456789abcdef" * 4)
+DEMO_HARD_CODED_PASSWORD = "00112233445566778899aabbccddeeff" * 2
 DEMO_HARD_CODED_PEPPER_HEX = "abcdef0123456789" * 4
 USING_DEMO_HARD_CODED_PASSWORD = False
 USING_DEMO_HARD_CODED_PEPPER = False
@@ -50,9 +50,14 @@ from sql_id_library import (  # noqa: E402 - demo config is set before first pro
     LABEL_BITS,
     MAX_ID,
     MAX_LABEL,
+    MAX_PASSWORD_BYTES,
+    MAX_PASSWORD_HEX_CHARS,
     NO_LABEL,
     RANGE_BITS,
     RESERVED_LABEL,
+    MIN_PASSWORD_BYTES,
+    MIN_PASSWORD_HEX_CHARS,
+    MIN_PASSWORD_UNIQUE_BYTES,
     SMALL_RANGE_CLASS,
     SMALL_RANGE_MAX_ID,
     SMALL_TAG_BITS,
@@ -74,6 +79,24 @@ from sql_id_library import (  # noqa: E402 - demo config is set before first pro
 )
 
 os.environ.setdefault(DEMO_ALLOW_BUNDLED_DOMAIN_SALT_ENV, "1")
+
+
+def demo_password_is_valid(value: object) -> bool:
+    """Return whether a demo-provided runtime secret satisfies library syntax."""
+    if not isinstance(value, str):
+        return False
+    if not MIN_PASSWORD_HEX_CHARS <= len(value) <= MAX_PASSWORD_HEX_CHARS:
+        return False
+    if len(value) % 2:
+        return False
+    try:
+        decoded = bytes.fromhex(value)
+    except ValueError:
+        return False
+    return (
+        MIN_PASSWORD_BYTES <= len(decoded) <= MAX_PASSWORD_BYTES
+        and len(set(decoded)) >= MIN_PASSWORD_UNIQUE_BYTES
+    )
 
 
 def warn_if_using_bundled_domain_salt() -> None:
@@ -108,8 +131,7 @@ def ensure_demo_config(*, strict: bool) -> None:
         )
 
     password = os.environ.get(ENV_PASSWORD_NAME)
-    password_bytes = password.encode("utf-8") if isinstance(password, str) else b""
-    if len(password_bytes) < 32 or len(set(password_bytes)) < 8:
+    if not demo_password_is_valid(password):
         USING_DEMO_HARD_CODED_PASSWORD = True
         os.environ[ENV_PASSWORD_NAME] = DEMO_HARD_CODED_PASSWORD
         print(
@@ -188,12 +210,12 @@ def build_parser() -> argparse.ArgumentParser:
             "  ./bin_demo/sql_id_demo_for_dev.py --int_id 1\n"
             "  ./bin_demo/sql_id_demo_for_dev.py --int_id 1 --label repair\n"
             "  ./bin_demo/sql_id_demo_for_dev.py --config-file ./conf/test_sql_id_config.yaml --int_id 1 --label repair\n"
-            "  ./bin_demo/sql_id_demo_for_dev.py --hex_id 8ca02d86446ce81a3339fdd1403f794a\n"
-            "  ./bin_demo/sql_id_demo_for_dev.py --hex_id 8ca02d86446ce81a3339fdd1403f794a --label repair\n"
+            "  ./bin_demo/sql_id_demo_for_dev.py --hex_id 330293be278aae686fb42aae757556dd\n"
+            "  ./bin_demo/sql_id_demo_for_dev.py --hex_id 91ee852205c1a03a5da06b1d97722582 --label repair\n"
             "  ./bin_demo/sql_id_demo_for_dev.py --strict-config --int_id 1\n\n"
             "Demo labels are loaded from ./conf/test_sql_id_config.yaml: "
             "dry_run=1, plan=2, execute=3, enquire=4, repair=5. Numeric labels "
-            "1..30 also work. Set XCTX_ID_PASSWORD for stable results across "
+            "1..30 also work. Set XCTX_ID_PASSWORD to a hex secret for stable results across "
             "separate commands."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -250,7 +272,7 @@ def print_config_note() -> None:
     print(f"Configured: {is_configured()}")
     if USING_DEMO_HARD_CODED_PASSWORD:
         print(f"Using DEMO_HARD_CODED_PASSWORD for {ENV_PASSWORD_NAME}.")
-        print("Real applications should set a stable secret in the process environment.")
+        print("Real applications should set a stable hex secret in the process environment.")
     if USING_DEMO_HARD_CODED_PEPPER:
         print(f"Using demo pepper file: {configured_pepper_file_location()}")
         print("Real applications should use a stable owner-readable pepper file.")

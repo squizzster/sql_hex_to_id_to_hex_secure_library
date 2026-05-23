@@ -17,7 +17,8 @@ pip install ".[yaml]"
 ## 1. Set A Deployment Salt
 
 For deployed public IDs, replace `DOMAIN_SALT_HEX` near the top of
-`sql_id_library.py` with a deployment-specific 32-byte random hex value:
+`sql_id_library.py` with a deployment-specific 32-byte random hex value. That
+means exactly `64` hex characters, decoded to `32` bytes:
 
 ```bash
 python -c "import secrets; print(secrets.token_hex(32))"
@@ -36,7 +37,9 @@ independently.
 
 ## 2. Set The Runtime Secret
 
-Set `XCTX_ID_PASSWORD` to a separate strong secret of at least 32 UTF-8 bytes:
+Set `XCTX_ID_PASSWORD` to a separate strong hex secret. It must contain
+`64..256` hex characters and is decoded to `32..128` secret bytes before key
+derivation:
 
 ```bash
 export XCTX_ID_PASSWORD="$(python -c 'import secrets; print(secrets.token_hex(32))')"

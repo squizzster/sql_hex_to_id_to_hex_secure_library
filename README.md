@@ -33,15 +33,14 @@ For deployed public IDs, use three independent inputs:
 - `XCTX_ID_PASSWORD` in the process environment
 - a disk pepper file, defaulting to `~/.sql_hex_id_pepper_file.key`
 
-Generate each one independently:
+Generate each one independently. `DOMAIN_SALT_HEX` must be exactly `64` hex
+characters. `XCTX_ID_PASSWORD` and the pepper must each be `64..256` hex
+characters; the library decodes those hex strings to bytes before key
+derivation.
 
 ```bash
 python -c "import secrets; print(secrets.token_hex(32))"
 ```
-
-The pepper file must contain hex only, with `64..256` hex characters. The
-minimum is exactly what the command above prints: `64` hex characters, or `32`
-bytes.
 
 Recommended pepper setup:
 
@@ -55,7 +54,7 @@ before deployment. The demo and tests set `XCTX_DEMO_ALLOW_BUNDLED_DOMAIN_SALT=1
 so sample IDs can still be generated with the bundled salt. Do not set that
 environment variable for deployed application processes.
 
-Changing the salt, password, or pepper after public IDs have been issued makes
+Changing the salt, runtime secret, or pepper after public IDs have been issued makes
 those existing public IDs stop decoding.
 
 ---
@@ -309,7 +308,7 @@ Typical errors include:
 | `not_string`          | Input was not a string                  |
 | `invalid_hex`         | Input contained non-hex characters      |
 | `unsupported_length`  | Public ID was not exactly 32 hex chars  |
-| `bad_config`          | Password, salt, or layout config failed |
+| `bad_config`          | Runtime secret, salt, or layout config failed |
 | `missing_pepper_file` | Pepper file does not exist              |
 | `unreadable_pepper_file` | Pepper file could not be read        |
 | `bad_pepper_permissions` | Pepper file permissions are unsafe   |
@@ -333,7 +332,8 @@ Set all three key inputs before issuing IDs:
 2. `XCTX_ID_PASSWORD` in the environment.
 3. A readable pepper file at the configured `pepper_file_location`.
 
-Use at least 32 UTF-8 bytes for the password:
+Use `64..256` hex characters for `XCTX_ID_PASSWORD`. The minimum is exactly
+what the command below prints: `64` hex characters, decoded to `32` bytes.
 
 ```bash
 export XCTX_ID_PASSWORD="$(python -c 'import secrets; print(secrets.token_hex(32))')"
@@ -348,7 +348,7 @@ chmod 0400 ~/.sql_hex_id_pepper_file.key
 
 Keep it private.
 Keep it stable.
-Rotate deliberately; changing the salt, password, or pepper makes previously
+Rotate deliberately; changing the salt, runtime secret, or pepper makes previously
 issued public IDs stop decoding. Do not reuse one value for another.
 
 ---

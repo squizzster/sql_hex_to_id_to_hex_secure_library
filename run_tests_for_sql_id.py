@@ -4,8 +4,8 @@
 Run with:
     XCTX_ID_PASSWORD="$(python -c 'import secrets; print(secrets.token_hex(32))')" python run_tests_for_sql_id.py
 
-The tests set a safe default test password and per-test pepper file, then also
-cover missing, weak, low-diversity, wrong-password, and wrong-pepper behavior.
+The tests set a safe default test hex secret and per-test pepper file, then also
+cover missing, weak, low-diversity, wrong-secret, and wrong-pepper behavior.
 """
 
 from __future__ import annotations
@@ -19,8 +19,8 @@ from pathlib import Path
 from unittest import mock
 
 
-TEST_PASSWORD = "unit-test-secret-" + ("0123456789abcdef" * 4)
-OTHER_TEST_PASSWORD = "different-test-secret-" + ("fedcba9876543210" * 4)
+TEST_PASSWORD = "00112233445566778899aabbccddeeff" * 2
+OTHER_TEST_PASSWORD = "ffeeddccbbaa99887766554433221100" * 2
 TEST_PEPPER_HEX = "0123456789abcdef" * 4
 OTHER_TEST_PEPPER_HEX = "fedcba9876543210" * 4
 TEST_DIR = Path(__file__).resolve().parent
@@ -121,7 +121,10 @@ class SqlIdLibraryTests(unittest.TestCase):
         self.assertEqual(sid.BIGINT_RANGE_MIN_ID, 4_294_967_296)
         self.assertEqual(sid.MAX_ID, 18_446_744_073_709_551_615)
         self.assertEqual(sid.MYSQL_UNSIGNED_BIGINT_MAX, sid.MAX_ID)
-        self.assertGreaterEqual(sid.MIN_PASSWORD_BYTES, 32)
+        self.assertEqual(sid.MIN_PASSWORD_HEX_CHARS, 64)
+        self.assertEqual(sid.MAX_PASSWORD_HEX_CHARS, 256)
+        self.assertEqual(sid.MIN_PASSWORD_BYTES, 32)
+        self.assertEqual(sid.MAX_PASSWORD_BYTES, 128)
         self.assertEqual(sid.DEFAULT_PEPPER_FILE_LOCATION, "~/.sql_hex_id_pepper_file.key")
         self.assertEqual(sid.MIN_PEPPER_HEX_CHARS, 64)
         self.assertEqual(sid.MAX_PEPPER_HEX_CHARS, 256)
@@ -129,6 +132,9 @@ class SqlIdLibraryTests(unittest.TestCase):
         self.assertEqual(sid.MAX_PEPPER_BYTES, 128)
         self.assertEqual(sid.configured_pepper_file_location(), str(TEST_PEPPER_PATH))
         self.assertGreaterEqual(sid.ROUNDS, 12)
+        self.assertEqual(sid.DOMAIN_SALT_HEX_CHARS, 64)
+        self.assertEqual(sid.DOMAIN_SALT_BYTES, 32)
+        self.assertEqual(sid.MIN_DOMAIN_SALT_UNIQUE_BYTES, 8)
         self.assertRegex(sid.DOMAIN_SALT_HEX, re.compile(r"^[0-9a-fA-F]{64}$"))
         self.assertEqual(len(bytes.fromhex(sid.DOMAIN_SALT_HEX)), 32)
         self.assertTrue(sid._constants_are_sane())
@@ -568,17 +574,22 @@ class SqlIdLibraryTests(unittest.TestCase):
             self.assertEqual(result.error_code, "bad_config")
             self.assertIsNone(sid.hex_to_id("0" * sid.HEX_CHARS))
 
-        with patched_password("short"):
-            self.assertFalse(sid.is_configured())
-            self.assertIsNone(sid.id_to_hex(1))
-            self.assertEqual(sid.validate_hex("0" * sid.HEX_CHARS).error_code, "bad_config")
+        bad_passwords = [
+            "short",
+            "a" * (sid.MIN_PASSWORD_HEX_CHARS - 2),
+            "0" * (sid.MIN_PASSWORD_HEX_CHARS + 1),
+            "g" * sid.MIN_PASSWORD_HEX_CHARS,
+            "00" * sid.MIN_PASSWORD_BYTES,
+            "01" * (sid.MAX_PASSWORD_BYTES + 1),
+        ]
+        for bad_password in bad_passwords:
+            with self.subTest(password=bad_password[:16]):
+                with patched_password(bad_password):
+                    self.assertFalse(sid.is_configured())
+                    self.assertIsNone(sid.id_to_hex(1))
+                    self.assertEqual(sid.validate_hex("0" * sid.HEX_CHARS).error_code, "bad_config")
 
-        with patched_password("a" * sid.MIN_PASSWORD_BYTES):
-            self.assertFalse(sid.is_configured())
-            self.assertIsNone(sid.id_to_hex(1))
-            self.assertEqual(sid.validate_hex("0" * sid.HEX_CHARS).error_code, "bad_config")
-
-        with patched_password("0123456789abcdef" * 2):
+        with patched_password("0123456789abcdef" * 4):
             self.assertTrue(sid.is_configured())
             self.assertIsNotNone(sid.id_to_hex(1))
 
@@ -610,10 +621,8 @@ class SqlIdLibraryTests(unittest.TestCase):
     def test_private_domain_salt_does_not_require_demo_override(self) -> None:
         private_salt_hex = "1234567890abcdef" * 4
         old_domain_salt_hex = sid.DOMAIN_SALT_HEX
-        old_domain_salt = sid._DOMAIN_SALT
         try:
             sid.DOMAIN_SALT_HEX = private_salt_hex
-            sid._DOMAIN_SALT = bytes.fromhex(private_salt_hex)
             sid._derive_material.cache_clear()
 
             with patched_env_var(sid.DEMO_ALLOW_BUNDLED_DOMAIN_SALT_ENV, None):
@@ -621,7 +630,29 @@ class SqlIdLibraryTests(unittest.TestCase):
                 self.assertIsNotNone(sid.id_to_hex(1))
         finally:
             sid.DOMAIN_SALT_HEX = old_domain_salt_hex
-            sid._DOMAIN_SALT = old_domain_salt
+            sid._derive_material.cache_clear()
+
+    def test_domain_salt_hex_is_strictly_validated(self) -> None:
+        old_domain_salt_hex = sid.DOMAIN_SALT_HEX
+        bad_salts = [
+            "0" * (sid.DOMAIN_SALT_HEX_CHARS - 2),
+            "0" * (sid.DOMAIN_SALT_HEX_CHARS + 1),
+            "g" * sid.DOMAIN_SALT_HEX_CHARS,
+            "00" * sid.DOMAIN_SALT_BYTES,
+        ]
+        try:
+            for bad_salt in bad_salts:
+                with self.subTest(salt=bad_salt[:16]):
+                    sid.DOMAIN_SALT_HEX = bad_salt
+                    sid._derive_material.cache_clear()
+                    self.assertFalse(sid.is_configured())
+                    self.assertIsNone(sid.id_to_hex(1))
+                    result = sid.validate_hex("0" * sid.HEX_CHARS)
+                    self.assertFalse(result.ok)
+                    self.assertEqual(result.error_code, "bad_config")
+                    self.assertIn("DOMAIN_SALT_HEX", result.error or "")
+        finally:
+            sid.DOMAIN_SALT_HEX = old_domain_salt_hex
             sid._derive_material.cache_clear()
 
     def test_pepper_file_config_errors_are_specific(self) -> None:

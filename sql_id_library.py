@@ -58,8 +58,8 @@ Secret configuration:
     This v4 scheme requires three independent inputs: DOMAIN_SALT_HEX,
     XCTX_ID_PASSWORD, and a disk pepper file. Replace DOMAIN_SALT_HEX near the
     top of this file with a deployment-specific 32-byte random hex string, set
-    XCTX_ID_PASSWORD to at least 32 UTF-8 bytes, and create the pepper file
-    configured by ``pepper_file_location``.
+    XCTX_ID_PASSWORD to a separate 64..256 character hex secret, and create the
+    pepper file configured by ``pepper_file_location``.
 
     Generate each value independently:
 
@@ -67,7 +67,7 @@ Secret configuration:
 
     The bundled domain salt is public and is rejected during normal library use.
     The demo and tests explicitly set XCTX_DEMO_ALLOW_BUNDLED_DOMAIN_SALT=1 so
-    sample IDs can still be generated. Changing any of the salt, password, or
+    sample IDs can still be generated. Changing any of the salt, secret, or
     pepper after issuing IDs makes existing public IDs stop decoding.
 
 Operational hardening:
@@ -109,7 +109,10 @@ from typing import Final
 
 ENV_PASSWORD_NAME: Final[str] = "XCTX_ID_PASSWORD"
 DEMO_ALLOW_BUNDLED_DOMAIN_SALT_ENV: Final[str] = "XCTX_DEMO_ALLOW_BUNDLED_DOMAIN_SALT"
+MIN_PASSWORD_HEX_CHARS: Final[int] = 64
+MAX_PASSWORD_HEX_CHARS: Final[int] = 256
 MIN_PASSWORD_BYTES: Final[int] = 32
+MAX_PASSWORD_BYTES: Final[int] = 128
 MIN_PASSWORD_UNIQUE_BYTES: Final[int] = 8
 PEPPER_FILE_LOCATION_KEY: Final[str] = "pepper_file_location"
 LABELS_CONFIG_KEY: Final[str] = "labels"
@@ -119,6 +122,9 @@ MAX_PEPPER_HEX_CHARS: Final[int] = 256
 MIN_PEPPER_BYTES: Final[int] = 32
 MAX_PEPPER_BYTES: Final[int] = 128
 MIN_PEPPER_UNIQUE_BYTES: Final[int] = 8
+DOMAIN_SALT_HEX_CHARS: Final[int] = 64
+DOMAIN_SALT_BYTES: Final[int] = 32
+MIN_DOMAIN_SALT_UNIQUE_BYTES: Final[int] = 8
 
 SCHEME_REVISION: Final[int] = 4
 VERSION_BITS: Final[int] = 3
@@ -153,7 +159,7 @@ SUPPORTED_HEX_LENGTHS: Final[tuple[int, ...]] = (HEX_CHARS,)
 
 # Deployment-specific 32-byte domain-separation salt.
 #
-# The bundled value is public and accepted only when the explicit demo/test
+# The bundled value is public and allowed only when the explicit demo/test
 # override is set. Deployed applications must replace it with a private random
 # value generated with:
 #
@@ -164,7 +170,6 @@ SUPPORTED_HEX_LENGTHS: Final[tuple[int, ...]] = (HEX_CHARS,)
 # new scheme and breaks previously issued IDs.
 BUNDLED_DOMAIN_SALT_HEX: Final[str] = "0b91b4e8fd74bcb256a19d188c83470a7b75a4897babb252e54b6eb8f8bb392d"
 DOMAIN_SALT_HEX: Final[str] = BUNDLED_DOMAIN_SALT_HEX
-_DOMAIN_SALT: Final[bytes] = bytes.fromhex(DOMAIN_SALT_HEX)
 
 _DECIMAL_RE: Final[re.Pattern[str]] = re.compile(r"^[0-9]+$")
 _HEX_CHARS_RE: Final[re.Pattern[str]] = re.compile(r"^[0-9a-fA-F]+$")
@@ -383,6 +388,8 @@ __all__ = [
     "DEFAULT_LAYOUT",
     "DEFAULT_PEPPER_FILE_LOCATION",
     "DEMO_ALLOW_BUNDLED_DOMAIN_SALT_ENV",
+    "DOMAIN_SALT_BYTES",
+    "DOMAIN_SALT_HEX_CHARS",
     "DOMAIN_SALT_HEX",
     "ENV_PASSWORD_NAME",
     "HEX_CHARS",
@@ -398,13 +405,17 @@ __all__ = [
     "MAX_ID",
     "MAX_ID_BITS",
     "MAX_LABEL",
+    "MAX_PASSWORD_BYTES",
+    "MAX_PASSWORD_HEX_CHARS",
     "MAX_PEPPER_BYTES",
     "MAX_PEPPER_HEX_CHARS",
     "MAX_TAG_BITS",
+    "MIN_DOMAIN_SALT_UNIQUE_BYTES",
     "MIN_ID",
     "MIN_PEPPER_BYTES",
     "MIN_PEPPER_HEX_CHARS",
     "MIN_PASSWORD_BYTES",
+    "MIN_PASSWORD_HEX_CHARS",
     "MIN_TAG_BITS",
     "MYSQL_UNSIGNED_BIGINT_MAX",
     "NO_LABEL",
@@ -475,7 +486,11 @@ class _ValidationFailure(ValueError):
 
 def _registry_is_sane() -> bool:
     """Return True when the fixed layout and reserved ranges are consistent."""
-    if len(_DOMAIN_SALT) != 32:
+    if len(BUNDLED_DOMAIN_SALT_HEX) != DOMAIN_SALT_HEX_CHARS:
+        return False
+    if not _HEX_CHARS_RE.fullmatch(BUNDLED_DOMAIN_SALT_HEX):
+        return False
+    if len(bytes.fromhex(BUNDLED_DOMAIN_SALT_HEX)) != DOMAIN_SALT_BYTES:
         return False
     if ROUNDS < 12:
         return False
@@ -518,6 +533,14 @@ def _registry_is_sane() -> bool:
     if MYSQL_UNSIGNED_BIGINT_MAX != MAX_ID:
         return False
     if SUPPORTED_HEX_LENGTHS != (32,):
+        return False
+    if DOMAIN_SALT_HEX_CHARS != 64 or DOMAIN_SALT_BYTES != 32:
+        return False
+    if MIN_DOMAIN_SALT_UNIQUE_BYTES != 8:
+        return False
+    if MIN_PASSWORD_HEX_CHARS != 64 or MAX_PASSWORD_HEX_CHARS != 256:
+        return False
+    if MIN_PASSWORD_BYTES != 32 or MAX_PASSWORD_BYTES != 128:
         return False
     if MIN_PEPPER_HEX_CHARS != 64 or MAX_PEPPER_HEX_CHARS != 256:
         return False
@@ -906,28 +929,66 @@ def _label_name_for_id(label_id: int) -> str | None:
         return _LABEL_NAMES_BY_ID.get(label_id)
 
 
-def _password_bytes() -> bytes:
-    """Return configured password bytes or raise an internal config error."""
-    password = os.environ.get(ENV_PASSWORD_NAME)
-    if not isinstance(password, str):
-        raise _ConfigError("bad_config", f"{ENV_PASSWORD_NAME} is required")
+def _decode_config_hex(
+    *,
+    name: str,
+    value: object,
+    min_hex_chars: int,
+    max_hex_chars: int,
+    min_bytes: int,
+    max_bytes: int,
+    min_unique_bytes: int,
+) -> bytes:
+    """Decode a hex-encoded config secret with strict size and diversity checks."""
+    if not isinstance(value, str):
+        raise _ConfigError("bad_config", f"{name} is required")
+    if len(value) < min_hex_chars:
+        raise _ConfigError("bad_config", f"{name} must be at least {min_hex_chars} hex characters")
+    if len(value) > max_hex_chars:
+        raise _ConfigError("bad_config", f"{name} must be at most {max_hex_chars} hex characters")
+    if len(value) % 2:
+        raise _ConfigError("bad_config", f"{name} must have an even number of hex characters")
+    if not _HEX_CHARS_RE.fullmatch(value):
+        raise _ConfigError("bad_config", f"{name} must contain only hex characters")
 
-    password_bytes = password.encode("utf-8")
-    if len(password_bytes) < MIN_PASSWORD_BYTES:
-        raise _ConfigError("bad_config", f"{ENV_PASSWORD_NAME} must be at least {MIN_PASSWORD_BYTES} bytes")
-    if len(set(password_bytes)) < MIN_PASSWORD_UNIQUE_BYTES:
-        raise _ConfigError("bad_config", f"{ENV_PASSWORD_NAME} has too little byte diversity")
-    return password_bytes
+    decoded = bytes.fromhex(value)
+    if not min_bytes <= len(decoded) <= max_bytes:
+        raise _ConfigError("bad_config", f"{name} must decode to {min_bytes}..{max_bytes} bytes")
+    if len(set(decoded)) < min_unique_bytes:
+        raise _ConfigError("bad_config", f"{name} has too little byte diversity")
+    return decoded
+
+
+def _password_bytes() -> bytes:
+    """Return configured hex-decoded runtime secret bytes or raise a config error."""
+    return _decode_config_hex(
+        name=ENV_PASSWORD_NAME,
+        value=os.environ.get(ENV_PASSWORD_NAME),
+        min_hex_chars=MIN_PASSWORD_HEX_CHARS,
+        max_hex_chars=MAX_PASSWORD_HEX_CHARS,
+        min_bytes=MIN_PASSWORD_BYTES,
+        max_bytes=MAX_PASSWORD_BYTES,
+        min_unique_bytes=MIN_PASSWORD_UNIQUE_BYTES,
+    )
 
 
 def _domain_salt_bytes() -> bytes:
     """Return domain salt bytes, rejecting the bundled salt outside demo/test use."""
-    if DOMAIN_SALT_HEX == BUNDLED_DOMAIN_SALT_HEX and os.environ.get(DEMO_ALLOW_BUNDLED_DOMAIN_SALT_ENV) != "1":
+    domain_salt = _decode_config_hex(
+        name="DOMAIN_SALT_HEX",
+        value=DOMAIN_SALT_HEX,
+        min_hex_chars=DOMAIN_SALT_HEX_CHARS,
+        max_hex_chars=DOMAIN_SALT_HEX_CHARS,
+        min_bytes=DOMAIN_SALT_BYTES,
+        max_bytes=DOMAIN_SALT_BYTES,
+        min_unique_bytes=MIN_DOMAIN_SALT_UNIQUE_BYTES,
+    )
+    if DOMAIN_SALT_HEX.lower() == BUNDLED_DOMAIN_SALT_HEX and os.environ.get(DEMO_ALLOW_BUNDLED_DOMAIN_SALT_ENV) != "1":
         raise _ConfigError(
             "bad_config",
             f"replace DOMAIN_SALT_HEX or set {DEMO_ALLOW_BUNDLED_DOMAIN_SALT_ENV}=1 for demo/test use only",
         )
-    return _DOMAIN_SALT
+    return domain_salt
 
 
 def _configured_pepper_path() -> Path:
