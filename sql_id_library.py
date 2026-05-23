@@ -55,23 +55,20 @@ Generic inspection:
 
 Secret configuration:
 
-    This v4 scheme requires three independent inputs: DOMAIN_SALT_HEX,
-    XCTX_ID_PASSWORD, and a disk pepper file. Replace DOMAIN_SALT_HEX near the
-    top of this file with a deployment-specific hex string, set
-    XCTX_ID_PASSWORD to a separate hex secret, and create the pepper file
-    configured by ``pepper_file_location``. Each of those three key inputs uses
-    the same 64..512 hex-character contract. The decoded bytes are checked for
-    minimum byte diversity and extreme bit imbalance, then normalized to a
-    role-separated SHA-512 digest before key derivation.
+    This v4 scheme requires three independent inputs: SQL_ID_LIBRARY_DOMAIN_SALT_HEX,
+    SQL_ID_LIBRARY_PASSWORD_HEX, and a disk pepper file. Set both environment
+    variables to independently generated deployment-specific hex strings, and
+    create the pepper file configured by ``pepper_file_location``. Each of those
+    three key inputs uses the same 64..512 hex-character contract. The decoded
+    bytes are checked for minimum byte diversity and extreme bit imbalance, then
+    normalized to a role-separated SHA-512 digest before key derivation.
 
     Generate each value independently:
 
         python -c "import secrets; print(secrets.token_hex(32))"
 
-    The bundled domain salt is public and is rejected during normal library use.
-    The demo and tests explicitly set XCTX_DEMO_ALLOW_BUNDLED_DOMAIN_SALT=1 so
-    sample IDs can still be generated. Changing any of the salt, secret, or
-    pepper after issuing IDs makes existing public IDs stop decoding.
+    Changing any of the salt, secret, or pepper after issuing IDs makes existing
+    public IDs stop decoding.
 
 Operational hardening:
 
@@ -111,8 +108,8 @@ from types import MappingProxyType
 from typing import Final
 
 
-ENV_PASSWORD_NAME: Final[str] = "XCTX_ID_PASSWORD"
-DEMO_ALLOW_BUNDLED_DOMAIN_SALT_ENV: Final[str] = "XCTX_DEMO_ALLOW_BUNDLED_DOMAIN_SALT"
+ENV_PASSWORD_NAME: Final[str] = "SQL_ID_LIBRARY_PASSWORD_HEX"
+ENV_DOMAIN_SALT_NAME: Final[str] = "SQL_ID_LIBRARY_DOMAIN_SALT_HEX"
 MIN_KEY_INPUT_HEX_CHARS: Final[int] = 64
 MAX_KEY_INPUT_HEX_CHARS: Final[int] = 512
 MIN_KEY_INPUT_BYTES: Final[int] = 32
@@ -173,20 +170,6 @@ ROUNDS: Final[int] = 16
 
 ACTIVE_DECODE_VERSIONS: Final[frozenset[int]] = frozenset({ISSUE_VERSION})
 SUPPORTED_HEX_LENGTHS: Final[tuple[int, ...]] = (HEX_CHARS,)
-
-# Deployment-specific domain-separation salt.
-#
-# The bundled value is public and allowed only when the explicit demo/test
-# override is set. Deployed applications must replace it with a private random
-# value generated with:
-#
-#     python -c "import secrets; print(secrets.token_hex(32))"
-#
-# Generate this independently from XCTX_ID_PASSWORD and the pepper file.
-# Changing any of those values after issuing public IDs intentionally creates a
-# new scheme and breaks previously issued IDs.
-BUNDLED_DOMAIN_SALT_HEX: Final[str] = "0b91b4e8fd74bcb256a19d188c83470a7b75a4897babb252e54b6eb8f8bb392d"
-DOMAIN_SALT_HEX: Final[str] = BUNDLED_DOMAIN_SALT_HEX
 
 _DECIMAL_RE: Final[re.Pattern[str]] = re.compile(r"^[0-9]+$")
 _HEX_CHARS_RE: Final[re.Pattern[str]] = re.compile(r"^[0-9a-fA-F]+$")
@@ -401,11 +384,9 @@ _CONFIG_FILE_CACHE: dict[Path, Mapping[str, object]] = {}
 
 __all__ = [
     "ACTIVE_DECODE_VERSIONS",
-    "BUNDLED_DOMAIN_SALT_HEX",
     "DEFAULT_LAYOUT",
     "DEFAULT_PEPPER_FILE_LOCATION",
-    "DEMO_ALLOW_BUNDLED_DOMAIN_SALT_ENV",
-    "DOMAIN_SALT_HEX",
+    "ENV_DOMAIN_SALT_NAME",
     "ENV_PASSWORD_NAME",
     "HEX_CHARS",
     "BIGINT_ID_BITS",
@@ -512,15 +493,9 @@ class _ValidationFailure(ValueError):
 
 def _registry_is_sane() -> bool:
     """Return True when the fixed layout and reserved ranges are consistent."""
-    if not MIN_KEY_INPUT_HEX_CHARS <= len(BUNDLED_DOMAIN_SALT_HEX) <= MAX_KEY_INPUT_HEX_CHARS:
-        return False
-    if not _HEX_CHARS_RE.fullmatch(BUNDLED_DOMAIN_SALT_HEX):
-        return False
-    if not MIN_KEY_INPUT_BYTES <= len(bytes.fromhex(BUNDLED_DOMAIN_SALT_HEX)) <= MAX_KEY_INPUT_BYTES:
-        return False
     if ROUNDS < 12:
         return False
-    if DEMO_ALLOW_BUNDLED_DOMAIN_SALT_ENV != "XCTX_DEMO_ALLOW_BUNDLED_DOMAIN_SALT":
+    if ENV_DOMAIN_SALT_NAME != "SQL_ID_LIBRARY_DOMAIN_SALT_HEX":
         return False
     if VERSION_BITS != 3 or LABEL_BITS != 5 or RANGE_BITS != 1:
         return False
@@ -1086,21 +1061,16 @@ def _password_bytes() -> bytes:
 
 
 def _domain_salt_bytes() -> bytes:
-    """Return normalized domain salt bytes, rejecting bundled demo salt in production."""
+    """Return normalized domain salt bytes or raise a config error."""
     domain_salt = _decode_config_hex(
-        name="DOMAIN_SALT_HEX",
-        value=DOMAIN_SALT_HEX,
+        name=ENV_DOMAIN_SALT_NAME,
+        value=os.environ.get(ENV_DOMAIN_SALT_NAME),
         min_hex_chars=MIN_DOMAIN_SALT_HEX_CHARS,
         max_hex_chars=MAX_DOMAIN_SALT_HEX_CHARS,
         min_bytes=MIN_DOMAIN_SALT_BYTES,
         max_bytes=MAX_DOMAIN_SALT_BYTES,
         min_unique_bytes=MIN_DOMAIN_SALT_UNIQUE_BYTES,
     )
-    if DOMAIN_SALT_HEX.lower() == BUNDLED_DOMAIN_SALT_HEX and os.environ.get(DEMO_ALLOW_BUNDLED_DOMAIN_SALT_ENV) != "1":
-        raise _ConfigError(
-            "bad_config",
-            f"replace DOMAIN_SALT_HEX or set {DEMO_ALLOW_BUNDLED_DOMAIN_SALT_ENV}=1 for demo/test use only",
-        )
     return _normalize_key_input(_DOMAIN_SALT_KEY_INPUT_ROLE, domain_salt)
 
 

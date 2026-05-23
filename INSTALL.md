@@ -16,35 +16,33 @@ pip install ".[yaml]"
 
 ## 1. Set A Deployment Salt
 
-For deployed public IDs, replace `DOMAIN_SALT_HEX` near the top of
-`sql_id_library.py` with a deployment-specific random hex value. It must contain
-`64..512` hex characters. The decoded `32..256` bytes are sanity-checked and
-then normalized to a role-separated SHA-512 digest before key derivation:
+For deployed public IDs, set `SQL_ID_LIBRARY_DOMAIN_SALT_HEX` in the process
+environment. It must contain `64..512` hex characters. The decoded `32..256`
+bytes are sanity-checked and then normalized to a role-separated SHA-512 digest
+before key derivation:
 
 ```bash
-python -c "import secrets; print(secrets.token_hex(32))"
+export SQL_ID_LIBRARY_DOMAIN_SALT_HEX="$(python -c 'import secrets; print(secrets.token_hex(32))')"
 ```
 
-The bundled salt is public and is rejected during normal library use. Replace it
-before deployment. The demo and tests set `XCTX_DEMO_ALLOW_BUNDLED_DOMAIN_SALT=1`
-so sample IDs can still be generated with the bundled salt. Do not set that
-environment variable for deployed application processes.
+`SQL_ID_LIBRARY_DOMAIN_SALT_HEX` is required for normal library use. The library
+does not contain a deployment salt fallback.
 
 Treat the salt as one of three independent key inputs, alongside
-`XCTX_ID_PASSWORD` and the pepper file.
+`SQL_ID_LIBRARY_PASSWORD_HEX` and the pepper file.
 
-Do not reuse the salt as `XCTX_ID_PASSWORD` or the pepper. Generate all values
+Do not reuse the salt as `SQL_ID_LIBRARY_PASSWORD_HEX` or the pepper. Generate all values
 independently.
 
 ## 2. Set The Runtime Secret
 
-Set `XCTX_ID_PASSWORD` to a separate strong hex secret. It must contain
+Set `SQL_ID_LIBRARY_PASSWORD_HEX` to a separate strong hex secret. It must contain
 `64..512` hex characters. The decoded `32..256` secret bytes are checked with
 the same rules as the salt and pepper, then normalized to a role-separated
 SHA-512 digest before key derivation:
 
 ```bash
-export XCTX_ID_PASSWORD="$(python -c 'import secrets; print(secrets.token_hex(32))')"
+export SQL_ID_LIBRARY_PASSWORD_HEX="$(python -c 'import secrets; print(secrets.token_hex(32))')"
 ```
 
 Store this in your normal secret manager or process environment. Do not commit
@@ -72,8 +70,9 @@ The application process must be able to read this file. On POSIX systems the
 library rejects pepper files that allow execution, group write, or any
 other-user access. `0400`, `0600`, `0440`, and `0640` are acceptable patterns.
 
-Changing `DOMAIN_SALT_HEX`, `XCTX_ID_PASSWORD`, or the pepper after public IDs
-have been issued makes those existing public IDs stop decoding.
+Changing `SQL_ID_LIBRARY_DOMAIN_SALT_HEX`, `SQL_ID_LIBRARY_PASSWORD_HEX`, or the
+pepper after public IDs have been issued makes those existing public IDs stop
+decoding.
 
 ## 4. Configure SQL ID Settings
 
@@ -120,6 +119,6 @@ Run the developer demo:
 ./bin_demo/sql_id_demo_for_dev.py --int_id 1 --details
 ```
 
-If the demo prints a bundled-salt warning to stderr, the deployment salt has not
-been changed yet. Normal library use rejects that bundled salt unless
-`XCTX_DEMO_ALLOW_BUNDLED_DOMAIN_SALT=1` is set for demo/test use.
+If real environment values are missing, the demo prints the demo-only values it
+uses so the sample output can be reproduced. Real applications should set their
+own stable environment values and pepper file.

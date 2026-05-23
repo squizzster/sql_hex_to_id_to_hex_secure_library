@@ -4,9 +4,9 @@
 Run with:
     python -m pytest
 
-The tests set a safe default test hex secret and per-test pepper file, then also
-cover missing, weak, low-diversity, low-bit-balance, wrong-secret, and
-wrong-pepper behavior.
+The tests set safe default test hex key material and a per-test pepper file,
+then also cover missing, weak, low-diversity, low-bit-balance, wrong-secret,
+wrong-salt, and wrong-pepper behavior.
 """
 
 from __future__ import annotations
@@ -23,6 +23,8 @@ from unittest import mock
 
 TEST_PASSWORD = "00112233445566778899aabbccddeeff" * 2
 OTHER_TEST_PASSWORD = "ffeeddccbbaa99887766554433221100" * 2
+TEST_DOMAIN_SALT_HEX = "0b91b4e8fd74bcb256a19d188c83470a7b75a4897babb252e54b6eb8f8bb392d"
+OTHER_TEST_DOMAIN_SALT_HEX = "1234567890abcdef" * 4
 TEST_PEPPER_HEX = "0123456789abcdef" * 4
 OTHER_TEST_PEPPER_HEX = "fedcba9876543210" * 4
 LOW_BIT_BALANCE_HEX = "0102040810204080" * 4
@@ -35,8 +37,8 @@ DEMO_LABELS = {
 }
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 TEST_CONF_DIR = PROJECT_ROOT / "conf"
-os.environ.setdefault("XCTX_ID_PASSWORD", TEST_PASSWORD)
-os.environ["XCTX_DEMO_ALLOW_BUNDLED_DOMAIN_SALT"] = "1"
+os.environ["SQL_ID_LIBRARY_PASSWORD_HEX"] = TEST_PASSWORD
+os.environ["SQL_ID_LIBRARY_DOMAIN_SALT_HEX"] = TEST_DOMAIN_SALT_HEX
 
 import sql_id_library as sid  # noqa: E402  - env default is set before import
 
@@ -68,7 +70,7 @@ def write_test_pepper(path: Path, value: str = TEST_PEPPER_HEX, mode: int = 0o40
 
 @contextmanager
 def patched_password(value: str | None):
-    """Temporarily patch XCTX_ID_PASSWORD for tests."""
+    """Temporarily patch SQL_ID_LIBRARY_PASSWORD_HEX for tests."""
     with patched_env_var(sid.ENV_PASSWORD_NAME, value):
         yield
 
@@ -92,6 +94,7 @@ class TestSqlIdLibrary(unittest.TestCase):
         self.test_pepper_path = self.test_dir / "test_sql_id_pepper.key"
 
         os.environ[sid.ENV_PASSWORD_NAME] = TEST_PASSWORD
+        os.environ[sid.ENV_DOMAIN_SALT_NAME] = TEST_DOMAIN_SALT_HEX
         write_test_pepper(self.test_pepper_path)
         sid.clear_sql_id_config()
         sid.configure_sql_id({"pepper_file_location": str(self.test_pepper_path)})
@@ -123,7 +126,8 @@ class TestSqlIdLibrary(unittest.TestCase):
         self.assertEqual(sid.TOTAL_BITS, 128)
         self.assertEqual(sid.HEX_CHARS, 32)
         self.assertEqual(sid.SUPPORTED_HEX_LENGTHS, (32,))
-        self.assertEqual(sid.DEMO_ALLOW_BUNDLED_DOMAIN_SALT_ENV, "XCTX_DEMO_ALLOW_BUNDLED_DOMAIN_SALT")
+        self.assertEqual(sid.ENV_PASSWORD_NAME, "SQL_ID_LIBRARY_PASSWORD_HEX")
+        self.assertEqual(sid.ENV_DOMAIN_SALT_NAME, "SQL_ID_LIBRARY_DOMAIN_SALT_HEX")
         self.assertEqual(sid.ISSUE_VERSION, 2)
         self.assertEqual(sid.RESERVED_VERSION, 7)
         self.assertEqual(sid.NO_LABEL, 0)
@@ -158,8 +162,6 @@ class TestSqlIdLibrary(unittest.TestCase):
         self.assertEqual(sid.MIN_DOMAIN_SALT_BYTES, 32)
         self.assertEqual(sid.MAX_DOMAIN_SALT_BYTES, 256)
         self.assertEqual(sid.MIN_DOMAIN_SALT_UNIQUE_BYTES, 8)
-        self.assertRegex(sid.DOMAIN_SALT_HEX, re.compile(r"^[0-9a-fA-F]{64,512}$"))
-        self.assertTrue(32 <= len(bytes.fromhex(sid.DOMAIN_SALT_HEX)) <= 256)
         self.assertTrue(sid._constants_are_sane())
 
         self.assertEqual(layout.header_bits + sid.SMALL_ID_BITS + sid.SMALL_TAG_BITS, 128)
@@ -219,18 +221,12 @@ class TestSqlIdLibrary(unittest.TestCase):
             self.assertEqual(result.error_code, "bad_config")
             self.assertIn("bit balance", result.error or "")
 
-        old_domain_salt_hex = sid.DOMAIN_SALT_HEX
-        try:
-            sid.DOMAIN_SALT_HEX = LOW_BIT_BALANCE_HEX
-            sid._derive_material.cache_clear()
+        with patched_env_var(sid.ENV_DOMAIN_SALT_NAME, LOW_BIT_BALANCE_HEX):
             self.assertFalse(sid.is_configured())
             result = sid.validate_hex("0" * sid.HEX_CHARS)
             self.assertFalse(result.ok)
             self.assertEqual(result.error_code, "bad_config")
-            self.assertIn("DOMAIN_SALT_HEX bit balance", result.error or "")
-        finally:
-            sid.DOMAIN_SALT_HEX = old_domain_salt_hex
-            sid._derive_material.cache_clear()
+            self.assertIn(f"{sid.ENV_DOMAIN_SALT_NAME} bit balance", result.error or "")
 
         pepper_path = self.test_dir / "low_bit_balance_sql_id_pepper.key"
         write_test_pepper(pepper_path, LOW_BIT_BALANCE_HEX)
@@ -301,8 +297,8 @@ class TestSqlIdLibrary(unittest.TestCase):
     def test_golden_vectors_lock_public_id_format(self) -> None:
         self.assertEqual(os.environ.get(sid.ENV_PASSWORD_NAME), TEST_PASSWORD)
         self.assertEqual(TEST_PASSWORD, "00112233445566778899aabbccddeeff" * 2)
+        self.assertEqual(os.environ.get(sid.ENV_DOMAIN_SALT_NAME), TEST_DOMAIN_SALT_HEX)
         self.assertEqual(TEST_PEPPER_HEX, "0123456789abcdef" * 4)
-        self.assertEqual(sid.DOMAIN_SALT_HEX, sid.BUNDLED_DOMAIN_SALT_HEX)
 
         plain_vectors = [
             (1, "dc0f8c4efe8122af4b2c7a1d2815d69e"),
@@ -728,17 +724,16 @@ class TestSqlIdLibrary(unittest.TestCase):
             self.assertTrue(sid.is_configured())
             self.assertIsNotNone(sid.id_to_hex(1))
 
-    def test_bundled_domain_salt_requires_demo_override(self) -> None:
-        self.assertEqual(sid.DOMAIN_SALT_HEX, sid.BUNDLED_DOMAIN_SALT_HEX)
+    def test_domain_salt_env_is_required(self) -> None:
         self.assertTrue(sid.is_configured())
 
-        with patched_env_var(sid.DEMO_ALLOW_BUNDLED_DOMAIN_SALT_ENV, None):
+        with patched_env_var(sid.ENV_DOMAIN_SALT_NAME, None):
             self.assertFalse(sid.is_configured())
             self.assertIsNone(sid.id_to_hex(1))
             result = sid.validate_hex("0" * sid.HEX_CHARS)
             self.assertFalse(result.ok)
             self.assertEqual(result.error_code, "bad_config")
-            self.assertIn(sid.DEMO_ALLOW_BUNDLED_DOMAIN_SALT_ENV, result.error or "")
+            self.assertIn(sid.ENV_DOMAIN_SALT_NAME, result.error or "")
 
             missing_pepper_path = self.test_dir / "missing_for_salt_order.key"
             missing_pepper_path.unlink(missing_ok=True)
@@ -746,49 +741,38 @@ class TestSqlIdLibrary(unittest.TestCase):
             result = sid.validate_hex("0" * sid.HEX_CHARS)
             self.assertFalse(result.ok)
             self.assertEqual(result.error_code, "bad_config")
-            self.assertIn(sid.DEMO_ALLOW_BUNDLED_DOMAIN_SALT_ENV, result.error or "")
+            self.assertIn(sid.ENV_DOMAIN_SALT_NAME, result.error or "")
             sid.configure_sql_id({"pepper_file_location": str(self.test_pepper_path)})
 
-        with patched_env_var(sid.DEMO_ALLOW_BUNDLED_DOMAIN_SALT_ENV, "1"):
+    def test_domain_salt_env_changes_key_material(self) -> None:
+        first = self.assert_public_hex(sid.id_to_hex(1))
+
+        with patched_env_var(sid.ENV_DOMAIN_SALT_NAME, OTHER_TEST_DOMAIN_SALT_HEX):
             self.assertTrue(sid.is_configured())
-            self.assertIsNotNone(sid.id_to_hex(1))
+            second = self.assert_public_hex(sid.id_to_hex(1))
+            self.assertNotEqual(second, first)
+            self.assertEqual(sid.hex_to_id(second), 1)
+            self.assertIsNone(sid.hex_to_id(first))
 
-    def test_private_domain_salt_does_not_require_demo_override(self) -> None:
-        private_salt_hex = "1234567890abcdef" * 32
-        old_domain_salt_hex = sid.DOMAIN_SALT_HEX
-        try:
-            sid.DOMAIN_SALT_HEX = private_salt_hex
-            sid._derive_material.cache_clear()
+        self.assertEqual(sid.hex_to_id(first), 1)
 
-            with patched_env_var(sid.DEMO_ALLOW_BUNDLED_DOMAIN_SALT_ENV, None):
-                self.assertTrue(sid.is_configured())
-                self.assertIsNotNone(sid.id_to_hex(1))
-        finally:
-            sid.DOMAIN_SALT_HEX = old_domain_salt_hex
-            sid._derive_material.cache_clear()
-
-    def test_domain_salt_hex_is_strictly_validated(self) -> None:
-        old_domain_salt_hex = sid.DOMAIN_SALT_HEX
-        bad_salts = [
-            "0" * (sid.MIN_DOMAIN_SALT_HEX_CHARS - 2),
-            "0" * (sid.MAX_DOMAIN_SALT_HEX_CHARS + 2),
+    def test_domain_salt_env_is_strictly_validated(self) -> None:
+        bad_env_salts = [
+            "short",
+            "0" * (sid.MIN_DOMAIN_SALT_HEX_CHARS + 1),
             "g" * sid.MIN_DOMAIN_SALT_HEX_CHARS,
             "00" * sid.MIN_DOMAIN_SALT_BYTES,
+            LOW_BIT_BALANCE_HEX,
         ]
-        try:
-            for bad_salt in bad_salts:
-                with self.subTest(salt=bad_salt[:16]):
-                    sid.DOMAIN_SALT_HEX = bad_salt
-                    sid._derive_material.cache_clear()
+        for bad_salt in bad_env_salts:
+            with self.subTest(salt=bad_salt[:16]):
+                with patched_env_var(sid.ENV_DOMAIN_SALT_NAME, bad_salt):
                     self.assertFalse(sid.is_configured())
                     self.assertIsNone(sid.id_to_hex(1))
                     result = sid.validate_hex("0" * sid.HEX_CHARS)
                     self.assertFalse(result.ok)
                     self.assertEqual(result.error_code, "bad_config")
-                    self.assertIn("DOMAIN_SALT_HEX", result.error or "")
-        finally:
-            sid.DOMAIN_SALT_HEX = old_domain_salt_hex
-            sid._derive_material.cache_clear()
+                    self.assertIn(sid.ENV_DOMAIN_SALT_NAME, result.error or "")
 
     def test_pepper_file_config_errors_are_specific(self) -> None:
         cases = [

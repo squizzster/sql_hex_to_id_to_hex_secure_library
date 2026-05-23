@@ -29,19 +29,20 @@ file, see [INSTALL.md](INSTALL.md).
 
 For deployed public IDs, use three independent inputs:
 
-- `DOMAIN_SALT_HEX` near the top of `sql_id_library.py`
-- `XCTX_ID_PASSWORD` in the process environment
+- `SQL_ID_LIBRARY_DOMAIN_SALT_HEX` in the process environment
+- `SQL_ID_LIBRARY_PASSWORD_HEX` in the process environment
 - a disk pepper file, defaulting to `~/.sql_hex_id_pepper_file.key`
 
-Generate each one independently. `DOMAIN_SALT_HEX`, `XCTX_ID_PASSWORD`, and the
-pepper must each be `64..512` hex characters. The library decodes each value to
-`32..256` bytes, rejects low byte diversity and extreme bit imbalance, then
-normalizes the accepted bytes to a role-separated SHA-512 digest before key
-derivation. This normalization gives every allowed input length the same
-internal size; it does not add entropy to weak input.
+Generate each one independently. `SQL_ID_LIBRARY_DOMAIN_SALT_HEX`,
+`SQL_ID_LIBRARY_PASSWORD_HEX`, and the pepper must each be `64..512` hex characters. The
+library decodes each value to `32..256` bytes, rejects low byte diversity and
+extreme bit imbalance, then normalizes the accepted bytes to a role-separated
+SHA-512 digest before key derivation. This normalization gives every allowed
+input length the same internal size; it does not add entropy to weak input.
 
 ```bash
-python -c "import secrets; print(secrets.token_hex(32))"
+export SQL_ID_LIBRARY_DOMAIN_SALT_HEX="$(python -c 'import secrets; print(secrets.token_hex(32))')"
+export SQL_ID_LIBRARY_PASSWORD_HEX="$(python -c 'import secrets; print(secrets.token_hex(32))')"
 ```
 
 Recommended pepper setup:
@@ -51,10 +52,8 @@ python -c "import secrets; print(secrets.token_hex(32))" > ~/.sql_hex_id_pepper_
 chmod 0400 ~/.sql_hex_id_pepper_file.key
 ```
 
-The bundled salt is public and is rejected during normal library use. Replace it
-before deployment. The demo and tests set `XCTX_DEMO_ALLOW_BUNDLED_DOMAIN_SALT=1`
-so sample IDs can still be generated with the bundled salt. Do not set that
-environment variable for deployed application processes.
+`SQL_ID_LIBRARY_DOMAIN_SALT_HEX` is required for normal library use. The library
+does not contain a deployment salt fallback.
 
 Changing the salt, runtime secret, or pepper after public IDs have been issued makes
 those existing public IDs stop decoding.
@@ -331,23 +330,24 @@ Typical errors include:
 
 Set all three key inputs before issuing IDs:
 
-1. `DOMAIN_SALT_HEX` in source/config.
-2. `XCTX_ID_PASSWORD` in the environment.
+1. `SQL_ID_LIBRARY_DOMAIN_SALT_HEX` in the environment.
+2. `SQL_ID_LIBRARY_PASSWORD_HEX` in the environment.
 3. A readable pepper file at the configured `pepper_file_location`.
 
-Use `64..512` hex characters for `XCTX_ID_PASSWORD`. The minimum is exactly
-what the command below prints: `64` hex characters, decoded to `32` bytes.
-Accepted values are normalized to 64 internal bytes with SHA-512 before key
-derivation.
+Use `64..512` hex characters for `SQL_ID_LIBRARY_DOMAIN_SALT_HEX` and
+`SQL_ID_LIBRARY_PASSWORD_HEX`. The minimum is exactly what these commands print:
+`64` hex characters, decoded to `32` bytes. Accepted values are normalized to 64
+internal bytes with SHA-512 before key derivation.
 
 ```bash
-export XCTX_ID_PASSWORD="$(python -c 'import secrets; print(secrets.token_hex(32))')"
+export SQL_ID_LIBRARY_DOMAIN_SALT_HEX="$(python -c 'import secrets; print(secrets.token_hex(32))')"
+export SQL_ID_LIBRARY_PASSWORD_HEX="$(python -c 'import secrets; print(secrets.token_hex(32))')"
 ```
 
 Use `64..512` hex characters for the pepper. The raw pepper file is capped at
 512 bytes, so a max-length pepper must not include a trailing newline. The same
 hex, byte-diversity, bit-balance, and SHA-512 normalization rules apply to
-`DOMAIN_SALT_HEX`, `XCTX_ID_PASSWORD`, and the pepper:
+`SQL_ID_LIBRARY_DOMAIN_SALT_HEX`, `SQL_ID_LIBRARY_PASSWORD_HEX`, and the pepper:
 
 ```bash
 python -c "import secrets; print(secrets.token_hex(32))" > ~/.sql_hex_id_pepper_file.key
