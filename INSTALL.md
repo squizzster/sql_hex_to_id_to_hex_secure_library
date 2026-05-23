@@ -8,7 +8,7 @@ From this repository:
 pip install .
 ```
 
-If you want to load YAML label files:
+If you want to load YAML config files:
 
 ```bash
 pip install ".[yaml]"
@@ -24,11 +24,12 @@ python -c "import secrets; print(secrets.token_hex(32))"
 ```
 
 The bundled salt is public and is accepted by the library, but changing it is
-strongly recommended for public-ID deployment hardening. If an attacker does not
-have the deployment salt, they need both the deployed source/config value and
-`XCTX_ID_PASSWORD` to reproduce the public-ID scheme.
+strongly recommended for public-ID deployment hardening. Treat the salt as one
+of three independent key inputs, alongside `XCTX_ID_PASSWORD` and the pepper
+file.
 
-Do not reuse the salt as `XCTX_ID_PASSWORD`. Generate both values independently.
+Do not reuse the salt as `XCTX_ID_PASSWORD` or the pepper. Generate all values
+independently.
 
 ## 2. Set The Runtime Secret
 
@@ -41,32 +42,58 @@ export XCTX_ID_PASSWORD="$(python -c 'import secrets; print(secrets.token_hex(32
 Store this in your normal secret manager or process environment. Do not commit
 it to source control.
 
-Changing either `DOMAIN_SALT_HEX` or `XCTX_ID_PASSWORD` after public IDs have
-been issued makes those existing public IDs stop decoding.
+## 3. Create The Pepper File
 
-## 3. Configure Labels
+The default pepper path is:
 
-Configure labels in application code:
+```text
+~/.sql_hex_id_pepper_file.key
+```
+
+Create it with `64..256` hex characters. The minimum generator is:
+
+```bash
+python -c "import secrets; print(secrets.token_hex(32))" > ~/.sql_hex_id_pepper_file.key
+chmod 0400 ~/.sql_hex_id_pepper_file.key
+```
+
+The application process must be able to read this file. On POSIX systems the
+library rejects pepper files that allow execution, group write, or any
+other-user access. `0400`, `0600`, `0440`, and `0640` are acceptable patterns.
+
+Changing `DOMAIN_SALT_HEX`, `XCTX_ID_PASSWORD`, or the pepper after public IDs
+have been issued makes those existing public IDs stop decoding.
+
+## 4. Configure SQL ID Settings
+
+Configure labels and/or a custom pepper path in application code:
 
 ```python
-configure_sql_id_labels({
-    "dry_run": 1,
-    "plan": 2,
-    "execute": 3,
-    "enquire": 4,
-    "repair": 5,
+configure_sql_id({
+    "pepper_file_location": "~/.sql_hex_id_pepper_file.key",
+    "labels": {
+        "dry_run": 1,
+        "plan": 2,
+        "execute": 3,
+        "enquire": 4,
+        "repair": 5,
+    },
 })
 ```
 
-Or load labels from `./conf/test_sql_id_labels.json` or
-`./conf/test_sql_id_labels.yaml`. YAML support is optional and requires the
+Or load config from `./conf/test_sql_id_config.json` or
+`./conf/test_sql_id_config.yaml`. YAML support is optional and requires the
 `yaml` extra shown above:
 
 ```bash
 pip install ".[yaml]"
 ```
 
-## 4. Verify
+```python
+load_sql_id_config_from_file("./conf/test_sql_id_config.yaml")
+```
+
+## 5. Verify
 
 Run the regression tests:
 

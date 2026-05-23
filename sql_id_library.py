@@ -47,15 +47,20 @@ Generic inspection:
 
 Secret configuration:
 
-    Replace DOMAIN_SALT_HEX near the top of this file with a deployment-specific
-    32-byte random hex string, then set XCTX_ID_PASSWORD to at least 32 UTF-8
-    bytes of secret. Generate each value independently:
+    This v3 scheme requires three independent inputs: DOMAIN_SALT_HEX,
+    XCTX_ID_PASSWORD, and a disk pepper file. Replace DOMAIN_SALT_HEX near the
+    top of this file with a deployment-specific 32-byte random hex string, set
+    XCTX_ID_PASSWORD to at least 32 UTF-8 bytes, and create the pepper file
+    configured by ``pepper_file_location``.
+
+    Generate each value independently:
 
         python -c "import secrets; print(secrets.token_hex(32))"
 
     The bundled domain salt is public. A private deployment-specific salt is
-    useful hardening, but XCTX_ID_PASSWORD remains the secret key. Changing
-    either value after issuing IDs makes existing public IDs stop decoding.
+    useful hardening, but it is not a substitute for the password or pepper.
+    Changing any of the salt, password, or pepper after issuing IDs makes
+    existing public IDs stop decoding.
 
 Operational hardening:
 
@@ -83,6 +88,7 @@ import hmac
 import json
 import os
 import re
+import stat
 from collections.abc import Mapping
 from dataclasses import dataclass
 from functools import lru_cache
@@ -95,8 +101,16 @@ from typing import Final
 ENV_PASSWORD_NAME: Final[str] = "XCTX_ID_PASSWORD"
 MIN_PASSWORD_BYTES: Final[int] = 32
 MIN_PASSWORD_UNIQUE_BYTES: Final[int] = 8
+PEPPER_FILE_LOCATION_KEY: Final[str] = "pepper_file_location"
+LABELS_CONFIG_KEY: Final[str] = "labels"
+DEFAULT_PEPPER_FILE_LOCATION: Final[str] = "~/.sql_hex_id_pepper_file.key"
+MIN_PEPPER_HEX_CHARS: Final[int] = 64
+MAX_PEPPER_HEX_CHARS: Final[int] = 256
+MIN_PEPPER_BYTES: Final[int] = 32
+MAX_PEPPER_BYTES: Final[int] = 128
+MIN_PEPPER_UNIQUE_BYTES: Final[int] = 8
 
-SCHEME_REVISION: Final[int] = 2
+SCHEME_REVISION: Final[int] = 3
 VERSION_BITS: Final[int] = 3
 LABEL_BITS: Final[int] = 5
 ID_BITS: Final[int] = 32
@@ -104,7 +118,7 @@ TAG_BITS: Final[int] = 24
 TOTAL_BITS: Final[int] = 64
 HEX_CHARS: Final[int] = 16
 
-ISSUE_VERSION: Final[int] = 1
+ISSUE_VERSION: Final[int] = 2
 NO_LABEL: Final[int] = 0
 RESERVED_VERSION: Final[int] = (1 << VERSION_BITS) - 1
 RESERVED_LABEL: Final[int] = (1 << LABEL_BITS) - 1
@@ -249,29 +263,38 @@ MAX_PUBLIC_HEX_CHARS: Final[int] = HEX_CHARS
 # and uint32 decimal IDs need 10 digits; 32 leaves room for leading-zero padding.
 _MAX_PUBLIC_HEX_CHARS: Final[int] = HEX_CHARS
 _MAX_DECIMAL_ID_STRING_CHARS: Final[int] = 32
-_MAX_LABEL_FILE_BYTES: Final[int] = 2000
+_MAX_CONFIG_FILE_BYTES: Final[int] = 2000
 
-_LABEL_LOCK = RLock()
+_CONFIG_LOCK = RLock()
+_PEPPER_FILE_LOCATION: str = DEFAULT_PEPPER_FILE_LOCATION
+_PEPPER_CACHE: tuple[Path, bytes] | None = None
 _LABELS_BY_NAME: Mapping[str, int] = MappingProxyType({})
 _LABEL_NAMES_BY_ID: Mapping[int, str] = MappingProxyType({})
-_LABEL_FILE_CACHE: dict[Path, Mapping[str, int]] = {}
+_CONFIG_FILE_CACHE: dict[Path, Mapping[str, object]] = {}
 
 __all__ = [
     "ACTIVE_DECODE_VERSIONS",
     "DEFAULT_LAYOUT",
+    "DEFAULT_PEPPER_FILE_LOCATION",
     "DOMAIN_SALT_HEX",
     "ENV_PASSWORD_NAME",
     "HEX_CHARS",
     "ID_BITS",
     "ISSUE_VERSION",
     "LABEL_BITS",
+    "LABELS_CONFIG_KEY",
     "LAYOUT",
     "MAX_ID",
     "MAX_LABEL",
+    "MAX_PEPPER_BYTES",
+    "MAX_PEPPER_HEX_CHARS",
     "MIN_ID",
+    "MIN_PEPPER_BYTES",
+    "MIN_PEPPER_HEX_CHARS",
     "MIN_PASSWORD_BYTES",
     "MYSQL_UNSIGNED_INT_MAX",
     "NO_LABEL",
+    "PEPPER_FILE_LOCATION_KEY",
     "RESERVED_LABEL",
     "RESERVED_VERSION",
     "ROUNDS",
@@ -283,8 +306,9 @@ __all__ = [
     "TOTAL_BITS",
     "VERSION_BITS",
     "available_labels",
-    "clear_sql_id_labels",
-    "configure_sql_id_labels",
+    "clear_sql_id_config",
+    "configure_sql_id",
+    "configured_pepper_file_location",
     "hex_to_id",
     "hex_to_id_label",
     "hex_to_parts",
@@ -293,9 +317,9 @@ __all__ = [
     "inspect_hex",
     "is_configured",
     "layout_for_hex_length",
-    "load_sql_id_labels_from_file",
-    "re_load_sql_id_labels_from_file",
-    "reload_sql_id_labels_from_file",
+    "load_sql_id_config_from_file",
+    "reload_sql_id_pepper",
+    "reload_sql_id_config_from_file",
     "sql_decode_id",
     "sql_decode_id_label",
     "sql_generate_id",
@@ -309,6 +333,11 @@ __all__ = [
 
 class _ConfigError(ValueError):
     """Internal configuration error surfaced by validation helpers."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
 
 
 class _InputError(ValueError):
@@ -340,6 +369,10 @@ def _registry_is_sane() -> bool:
         return False
     if DEFAULT_LAYOUT.bytes != 8 or DEFAULT_LAYOUT.half_bits != 32:
         return False
+    if SCHEME_REVISION != 3:
+        return False
+    if ISSUE_VERSION != 2:
+        return False
     if not 1 <= ISSUE_VERSION < RESERVED_VERSION:
         return False
     if ACTIVE_DECODE_VERSIONS != frozenset({ISSUE_VERSION}):
@@ -351,6 +384,12 @@ def _registry_is_sane() -> bool:
     if MYSQL_UNSIGNED_INT_MAX != MAX_ID:
         return False
     if SUPPORTED_HEX_LENGTHS != (16,):
+        return False
+    if MIN_PEPPER_HEX_CHARS != 64 or MAX_PEPPER_HEX_CHARS != 256:
+        return False
+    if MIN_PEPPER_BYTES != 32 or MAX_PEPPER_BYTES != 128:
+        return False
+    if DEFAULT_PEPPER_FILE_LOCATION != "~/.sql_hex_id_pepper_file.key":
         return False
 
     layout = DEFAULT_LAYOUT
@@ -407,7 +446,7 @@ def _coerce_label(label: object, *, allow_zero: bool) -> int:
     """Resolve an int label id or configured label name into label bits."""
     if isinstance(label, str):
         normalized = _normalize_label_name(label)
-        with _LABEL_LOCK:
+        with _CONFIG_LOCK:
             label_id = _LABELS_BY_NAME.get(normalized)
         if label_id is None:
             raise _InputError(f"unknown SQL ID label: {label!r}")
@@ -440,19 +479,59 @@ def _validated_label_maps(labels: Mapping[str, int]) -> tuple[dict[str, int], di
     return by_name, by_id
 
 
-def configure_sql_id_labels(labels: Mapping[str, int]) -> None:
-    """Configure local names for label IDs 1..30.
+def _validate_pepper_file_location(value: object) -> str:
+    """Validate and normalize a configured pepper-file location."""
+    if not isinstance(value, str):
+        raise ValueError(f"{PEPPER_FILE_LOCATION_KEY} must be a string path")
+    location = value.strip()
+    if not location:
+        raise ValueError(f"{PEPPER_FILE_LOCATION_KEY} must not be empty")
+    if "\x00" in location:
+        raise ValueError(f"{PEPPER_FILE_LOCATION_KEY} must not contain NUL bytes")
+    return location
 
-    This lookup is local metadata only. The public ID stores the numeric label
-    bits, not the label name. Configure labels during application startup or
-    an explicit application-controlled reload.
+
+def _validated_sql_id_config(config: Mapping[str, object]) -> dict[str, object]:
+    """Validate a partial SQL ID config mapping."""
+    if not isinstance(config, Mapping):
+        raise ValueError("SQL ID config must be a mapping")
+
+    allowed_keys = {PEPPER_FILE_LOCATION_KEY, LABELS_CONFIG_KEY}
+    unknown_keys = set(config) - allowed_keys
+    if unknown_keys:
+        unknown = ", ".join(sorted(str(key) for key in unknown_keys))
+        raise ValueError(f"unknown SQL ID config key(s): {unknown}")
+    if not any(key in config for key in allowed_keys):
+        raise ValueError("SQL ID config must define labels, pepper_file_location, or both")
+
+    normalized: dict[str, object] = {}
+    if PEPPER_FILE_LOCATION_KEY in config:
+        normalized[PEPPER_FILE_LOCATION_KEY] = _validate_pepper_file_location(config[PEPPER_FILE_LOCATION_KEY])
+    if LABELS_CONFIG_KEY in config:
+        by_name, _by_id = _validated_label_maps(_labels_from_loaded_data(config[LABELS_CONFIG_KEY]))
+        normalized[LABELS_CONFIG_KEY] = by_name
+    return normalized
+
+
+def configure_sql_id(config: Mapping[str, object]) -> None:
+    """Configure the local SQL ID pepper-file location and/or label registry.
+
+    The pepper file is key material. The label registry is local metadata only:
+    public IDs store numeric label bits, not label names. Missing config keys
+    leave the current in-process value unchanged.
     """
-    global _LABELS_BY_NAME, _LABEL_NAMES_BY_ID
+    global _PEPPER_FILE_LOCATION, _PEPPER_CACHE, _LABELS_BY_NAME, _LABEL_NAMES_BY_ID
 
-    by_name, by_id = _validated_label_maps(labels)
-    with _LABEL_LOCK:
-        _LABELS_BY_NAME = MappingProxyType(by_name)
-        _LABEL_NAMES_BY_ID = MappingProxyType(by_id)
+    normalized = _validated_sql_id_config(config)
+    with _CONFIG_LOCK:
+        if PEPPER_FILE_LOCATION_KEY in normalized:
+            _PEPPER_FILE_LOCATION = normalized[PEPPER_FILE_LOCATION_KEY]  # type: ignore[assignment]
+            _PEPPER_CACHE = None
+            _derive_material.cache_clear()
+        if LABELS_CONFIG_KEY in normalized:
+            by_name, by_id = _validated_label_maps(normalized[LABELS_CONFIG_KEY])  # type: ignore[arg-type]
+            _LABELS_BY_NAME = MappingProxyType(by_name)
+            _LABEL_NAMES_BY_ID = MappingProxyType(by_id)
 
 
 def _reject_duplicate_json_pairs(pairs: list[tuple[object, object]]) -> dict[object, object]:
@@ -460,7 +539,7 @@ def _reject_duplicate_json_pairs(pairs: list[tuple[object, object]]) -> dict[obj
     result: dict[object, object] = {}
     for key, value in pairs:
         if key in result:
-            raise ValueError(f"duplicate key in JSON label file: {key!r}")
+            raise ValueError(f"duplicate key in JSON config file: {key!r}")
         result[key] = value
     return result
 
@@ -477,12 +556,12 @@ def _yaml_safe_load_no_duplicate_keys(yaml_module: object, text: str) -> object:
 
     def construct_mapping(loader: object, node: object, deep: bool = False) -> dict[object, object]:
         if not isinstance(node, mapping_node):
-            raise ValueError("label file must contain a YAML mapping")
+            raise ValueError("config file must contain a YAML mapping")
         mapping: dict[object, object] = {}
         for key_node, value_node in node.value:  # type: ignore[attr-defined]
             key = loader.construct_object(key_node, deep=deep)  # type: ignore[attr-defined]
             if key in mapping:
-                raise ValueError(f"duplicate key in YAML label file: {key!r}")
+                raise ValueError(f"duplicate key in YAML config file: {key!r}")
             mapping[key] = loader.construct_object(value_node, deep=deep)  # type: ignore[attr-defined]
         return mapping
 
@@ -493,7 +572,7 @@ def _yaml_safe_load_no_duplicate_keys(yaml_module: object, text: str) -> object:
 def _labels_from_loaded_data(data: object) -> dict[str, int]:
     """Normalize loaded label data into the public name -> id mapping."""
     if not isinstance(data, Mapping):
-        raise ValueError("label file must contain a mapping")
+        raise ValueError("labels must be a mapping")
 
     labels: dict[str, int] = {}
     seen_ids: dict[int, str] = {}
@@ -508,7 +587,7 @@ def _labels_from_loaded_data(data: object) -> dict[str, int]:
             name = raw_key
             label_id = raw_value
         if not isinstance(name, str):
-            raise ValueError("label file names must be strings")
+            raise ValueError("label names must be strings")
         try:
             normalized_name = _normalize_label_name(name)
             validated_id = _validate_label_id(label_id, allow_zero=False)
@@ -523,11 +602,18 @@ def _labels_from_loaded_data(data: object) -> dict[str, int]:
     return labels
 
 
-def _candidate_label_paths(path: Path) -> tuple[Path, ...]:
-    """Return existing same-stem .json/.yaml/.yml label files for comparison."""
+def _config_from_loaded_data(data: object) -> dict[str, object]:
+    """Normalize loaded JSON/YAML data into a partial SQL ID config mapping."""
+    if not isinstance(data, Mapping):
+        raise ValueError("config file must contain a mapping")
+    return _validated_sql_id_config(data)
+
+
+def _candidate_config_paths(path: Path) -> tuple[Path, ...]:
+    """Return existing same-stem .json/.yaml/.yml config files for comparison."""
     suffix = path.suffix.lower()
     if suffix not in {".json", ".yaml", ".yml"}:
-        raise ValueError("label file must use .json, .yaml, or .yml")
+        raise ValueError("config file must use .json, .yaml, or .yml")
 
     candidates = []
     for candidate_suffix in (".json", ".yaml", ".yml"):
@@ -539,117 +625,120 @@ def _candidate_label_paths(path: Path) -> tuple[Path, ...]:
     return tuple(dict.fromkeys(candidates))
 
 
-def _label_file_cache_key(path: Path) -> Path:
-    """Return the same cache key for same-stem .json/.yaml/.yml label files."""
+def _config_file_cache_key(path: Path) -> Path:
+    """Return the same cache key for same-stem .json/.yaml/.yml config files."""
     if path.suffix.lower() not in {".json", ".yaml", ".yml"}:
-        raise ValueError("label file must use .json, .yaml, or .yml")
+        raise ValueError("config file must use .json, .yaml, or .yml")
     return path.expanduser().resolve().with_suffix("")
 
 
-def _load_one_label_file(path: Path) -> dict[str, int]:
-    """Load one label file, enforce size, and return a normalized mapping."""
+def _load_one_config_file(path: Path) -> dict[str, object]:
+    """Load one config file, enforce size, and return a normalized mapping."""
     suffix = path.suffix.lower()
     try:
         with path.open("rb") as file_obj:
-            raw_data = file_obj.read(_MAX_LABEL_FILE_BYTES + 1)
-        if len(raw_data) > _MAX_LABEL_FILE_BYTES:
-            raise ValueError(f"label file is too large; maximum is {_MAX_LABEL_FILE_BYTES} bytes")
+            raw_data = file_obj.read(_MAX_CONFIG_FILE_BYTES + 1)
+        if len(raw_data) > _MAX_CONFIG_FILE_BYTES:
+            raise ValueError(f"config file is too large; maximum is {_MAX_CONFIG_FILE_BYTES} bytes")
         try:
             text = raw_data.decode("utf-8")
         except UnicodeDecodeError as exc:
-            raise ValueError(f"label file must be valid UTF-8: {exc}") from exc
+            raise ValueError(f"config file must be valid UTF-8: {exc}") from exc
         if suffix == ".json":
             data = json.loads(text, object_pairs_hook=_reject_duplicate_json_pairs)
         elif suffix in {".yaml", ".yml"}:
             try:
                 import yaml  # type: ignore[import-not-found]
             except ImportError as exc:
-                raise ValueError("YAML label files require the optional PyYAML package") from exc
+                raise ValueError("YAML config files require the optional PyYAML package") from exc
             data = _yaml_safe_load_no_duplicate_keys(yaml, text)
         else:
-            raise ValueError("label file must use .json, .yaml, or .yml")
+            raise ValueError("config file must use .json, .yaml, or .yml")
     except OSError as exc:
-        raise ValueError(f"could not read label file: {exc}") from exc
+        raise ValueError(f"could not read config file: {exc}") from exc
     except json.JSONDecodeError as exc:
-        raise ValueError(f"invalid JSON label file: {exc}") from exc
+        raise ValueError(f"invalid JSON config file: {exc}") from exc
 
-    by_name, _by_id = _validated_label_maps(_labels_from_loaded_data(data))
-    return by_name
-
-
-def _load_sql_id_label_files_uncached(label_path: Path) -> dict[str, int]:
-    """Load same-stem label files from disk and return a validated mapping."""
-    loaded = [(candidate, _load_one_label_file(candidate)) for candidate in _candidate_label_paths(label_path)]
-    first_path, first_labels = loaded[0]
-    for candidate, labels in loaded[1:]:
-        if labels != first_labels:
-            raise ValueError(f"label files do not match: {first_path} and {candidate}")
-    return first_labels
+    return _config_from_loaded_data(data)
 
 
-def load_sql_id_labels_from_file(path: str | os.PathLike[str]) -> None:
-    """Configure label names from cached or newly loaded .json/.yaml/.yml files.
+def _load_sql_id_config_files_uncached(config_path: Path) -> dict[str, object]:
+    """Load same-stem config files from disk and return a validated mapping."""
+    loaded = [(candidate, _load_one_config_file(candidate)) for candidate in _candidate_config_paths(config_path)]
+    first_path, first_config = loaded[0]
+    for candidate, config in loaded[1:]:
+        if config != first_config:
+            raise ValueError(f"config files do not match: {first_path} and {candidate}")
+    return first_config
+
+
+def load_sql_id_config_from_file(path: str | os.PathLike[str]) -> None:
+    """Configure SQL ID settings from cached or newly loaded config files.
 
     JSON support uses the Python standard library. YAML support is optional and
-    requires PyYAML to be installed. Supported mapping shapes are:
+    requires PyYAML to be installed. Supported mapping shape:
 
-        {"dry_run": 1, "plan": 2}
-        {"1": "dry_run", "2": "plan"}
+        {"pepper_file_location": "~/.sql_hex_id_pepper_file.key",
+         "labels": {"dry_run": 1, "plan": 2}}
 
     If same-stem files exist in more than one supported format, all available
-    .json, .yaml, and .yml files are loaded and must normalize to the same
-    label registry. Each file must be no larger than 2000 bytes.
+    .json, .yaml, and .yml files are loaded and must normalize to the exact
+    same SQL ID config. Each file must be no larger than 2000 bytes.
 
     File content is cached automatically by same-stem path after the first
     successful load. Later calls for the same cache key reuse the cached
-    registry. Use reload_sql_id_labels_from_file() when application logic
-    intentionally wants to re-read label files from disk.
+    config. Use reload_sql_id_config_from_file() when application logic
+    intentionally wants to re-read config files from disk.
     """
-    label_path = Path(path)
-    cache_key = _label_file_cache_key(label_path)
-    with _LABEL_LOCK:
-        cached_labels = _LABEL_FILE_CACHE.get(cache_key)
-        if cached_labels is None:
-            loaded_labels = _load_sql_id_label_files_uncached(label_path)
-            cached_labels = MappingProxyType(dict(loaded_labels))
-            _LABEL_FILE_CACHE[cache_key] = cached_labels
-        configure_sql_id_labels(cached_labels)
+    config_path = Path(path)
+    cache_key = _config_file_cache_key(config_path)
+    with _CONFIG_LOCK:
+        cached_config = _CONFIG_FILE_CACHE.get(cache_key)
+        if cached_config is None:
+            loaded_config = _load_sql_id_config_files_uncached(config_path)
+            cached_config = MappingProxyType(dict(loaded_config))
+            _CONFIG_FILE_CACHE[cache_key] = cached_config
+        configure_sql_id(cached_config)
 
 
-def reload_sql_id_labels_from_file(path: str | os.PathLike[str]) -> None:
-    """Re-read same-stem label files, refresh the cache, and configure them."""
-    label_path = Path(path)
-    cache_key = _label_file_cache_key(label_path)
-    loaded_labels = _load_sql_id_label_files_uncached(label_path)
-    cached_labels = MappingProxyType(dict(loaded_labels))
-    with _LABEL_LOCK:
-        _LABEL_FILE_CACHE[cache_key] = cached_labels
-        configure_sql_id_labels(cached_labels)
+def reload_sql_id_config_from_file(path: str | os.PathLike[str]) -> None:
+    """Re-read same-stem config files, refresh the cache, and configure them."""
+    config_path = Path(path)
+    cache_key = _config_file_cache_key(config_path)
+    loaded_config = _load_sql_id_config_files_uncached(config_path)
+    cached_config = MappingProxyType(dict(loaded_config))
+    with _CONFIG_LOCK:
+        _CONFIG_FILE_CACHE[cache_key] = cached_config
+        configure_sql_id(cached_config)
 
 
-def re_load_sql_id_labels_from_file(path: str | os.PathLike[str]) -> None:
-    """Alias for reload_sql_id_labels_from_file()."""
-    reload_sql_id_labels_from_file(path)
+def clear_sql_id_config() -> None:
+    """Reset the pepper-file location, labels, and cached file-loaded config."""
+    global _PEPPER_FILE_LOCATION, _PEPPER_CACHE, _LABELS_BY_NAME, _LABEL_NAMES_BY_ID
 
-
-def clear_sql_id_labels() -> None:
-    """Clear the local label-name lookup and cached file-loaded labels."""
-    global _LABELS_BY_NAME, _LABEL_NAMES_BY_ID
-
-    with _LABEL_LOCK:
+    with _CONFIG_LOCK:
+        _PEPPER_FILE_LOCATION = DEFAULT_PEPPER_FILE_LOCATION
+        _PEPPER_CACHE = None
         _LABELS_BY_NAME = MappingProxyType({})
         _LABEL_NAMES_BY_ID = MappingProxyType({})
-        _LABEL_FILE_CACHE.clear()
+        _CONFIG_FILE_CACHE.clear()
+        _derive_material.cache_clear()
+
+
+def configured_pepper_file_location() -> str:
+    """Return the configured pepper-file location string."""
+    with _CONFIG_LOCK:
+        return _PEPPER_FILE_LOCATION
 
 
 def available_labels() -> dict[str, int]:
     """Return a copy of the configured local label-name lookup."""
-    with _LABEL_LOCK:
+    with _CONFIG_LOCK:
         return dict(_LABELS_BY_NAME)
 
 
 def _label_name_for_id(label_id: int) -> str | None:
-    with _LABEL_LOCK:
+    with _CONFIG_LOCK:
         return _LABEL_NAMES_BY_ID.get(label_id)
 
 
@@ -657,22 +746,120 @@ def _password_bytes() -> bytes:
     """Return configured password bytes or raise an internal config error."""
     password = os.environ.get(ENV_PASSWORD_NAME)
     if not isinstance(password, str):
-        raise _ConfigError(f"{ENV_PASSWORD_NAME} is required")
+        raise _ConfigError("bad_config", f"{ENV_PASSWORD_NAME} is required")
 
     password_bytes = password.encode("utf-8")
     if len(password_bytes) < MIN_PASSWORD_BYTES:
-        raise _ConfigError(f"{ENV_PASSWORD_NAME} must be at least {MIN_PASSWORD_BYTES} bytes")
+        raise _ConfigError("bad_config", f"{ENV_PASSWORD_NAME} must be at least {MIN_PASSWORD_BYTES} bytes")
     if len(set(password_bytes)) < MIN_PASSWORD_UNIQUE_BYTES:
-        raise _ConfigError(f"{ENV_PASSWORD_NAME} has too little byte diversity")
+        raise _ConfigError("bad_config", f"{ENV_PASSWORD_NAME} has too little byte diversity")
     return password_bytes
 
 
-@lru_cache(maxsize=16)
-def _derive_material(password_bytes: bytes, layout: SqlIdLayout) -> tuple[tuple[bytes, ...], bytes]:
+def _configured_pepper_path() -> Path:
+    with _CONFIG_LOCK:
+        location = _PEPPER_FILE_LOCATION
+    return Path(location).expanduser()
+
+
+def _validate_pepper_permissions(path: Path) -> None:
+    """Reject pepper files with permissions that expose or mutate key material."""
+    try:
+        file_stat = path.stat()
+    except FileNotFoundError as exc:
+        raise _ConfigError("missing_pepper_file", f"pepper file does not exist: {path}") from exc
+    except OSError as exc:
+        raise _ConfigError("unreadable_pepper_file", f"could not stat pepper file: {exc}") from exc
+
+    if not stat.S_ISREG(file_stat.st_mode):
+        raise _ConfigError("bad_pepper_file", f"pepper path is not a regular file: {path}")
+
+    if os.name != "posix":
+        return
+
+    mode = stat.S_IMODE(file_stat.st_mode)
+    disallowed = stat.S_IXUSR | stat.S_IWGRP | stat.S_IXGRP | stat.S_IRWXO
+    if mode & disallowed:
+        raise _ConfigError(
+            "bad_pepper_permissions",
+            "pepper file permissions must not allow execution, group write, or any other-user access",
+        )
+    if not mode & (stat.S_IRUSR | stat.S_IRGRP):
+        raise _ConfigError("bad_pepper_permissions", "pepper file must be readable by owner or group")
+
+
+def _read_pepper_bytes_from_path(path: Path) -> bytes:
+    """Read and validate pepper bytes from one already-selected path."""
+    _validate_pepper_permissions(path)
+    try:
+        text = path.read_text(encoding="ascii").strip()
+    except UnicodeDecodeError as exc:
+        raise _ConfigError("invalid_pepper_hex", f"pepper file must contain ASCII hex: {exc}") from exc
+    except OSError as exc:
+        raise _ConfigError("unreadable_pepper_file", f"could not read pepper file: {exc}") from exc
+
+    if len(text) < MIN_PEPPER_HEX_CHARS:
+        raise _ConfigError("pepper_too_short", f"pepper hex must be at least {MIN_PEPPER_HEX_CHARS} characters")
+    if len(text) > MAX_PEPPER_HEX_CHARS:
+        raise _ConfigError("pepper_too_long", f"pepper hex must be at most {MAX_PEPPER_HEX_CHARS} characters")
+    if len(text) % 2:
+        raise _ConfigError("invalid_pepper_hex", "pepper hex must have an even number of characters")
+    if not _HEX_CHARS_RE.fullmatch(text):
+        raise _ConfigError("invalid_pepper_hex", "pepper file must contain only hex characters")
+
+    pepper = bytes.fromhex(text)
+    if not MIN_PEPPER_BYTES <= len(pepper) <= MAX_PEPPER_BYTES:
+        raise _ConfigError("bad_pepper_file", f"pepper must decode to {MIN_PEPPER_BYTES}..{MAX_PEPPER_BYTES} bytes")
+    if len(set(pepper)) < MIN_PEPPER_UNIQUE_BYTES:
+        raise _ConfigError("low_diversity_pepper", "pepper has too little byte diversity")
+    return pepper
+
+
+def _pepper_bytes() -> bytes:
+    """Return cached pepper bytes for the configured disk file."""
+    global _PEPPER_CACHE
+
+    with _CONFIG_LOCK:
+        path = _configured_pepper_path()
+        cache_key = path.resolve()
+        if _PEPPER_CACHE is not None and _PEPPER_CACHE[0] == cache_key:
+            return _PEPPER_CACHE[1]
+
+        pepper = _read_pepper_bytes_from_path(path)
+        _PEPPER_CACHE = (cache_key, pepper)
+        return pepper
+
+
+def reload_sql_id_pepper() -> None:
+    """Explicitly re-read and cache the currently configured pepper file."""
+    global _PEPPER_CACHE
+
+    with _CONFIG_LOCK:
+        path = _configured_pepper_path()
+        cache_key = path.resolve()
+        pepper = _read_pepper_bytes_from_path(path)
+        _PEPPER_CACHE = (cache_key, pepper)
+        _derive_material.cache_clear()
+
+
+@lru_cache(maxsize=32)
+def _derive_material(password_bytes: bytes, pepper_bytes: bytes, layout: SqlIdLayout) -> tuple[tuple[bytes, ...], bytes]:
     """Derive layout-specific Feistel round keys and validation-tag key."""
-    seed = hmac.new(
+    root_key = hmac.new(
         password_bytes,
-        _DOMAIN_SALT + b":xctx-sql-id-label-layout:" + layout.domain_label() + b":seed:",
+        (
+            b"xctx-sql-id-root-v3:"
+            + layout.domain_label()
+            + b":salt:"
+            + _DOMAIN_SALT
+            + b":pepper:"
+            + pepper_bytes
+        ),
+        hashlib.sha256,
+    ).digest()
+    seed = hmac.new(
+        root_key,
+        b":xctx-sql-id-v3-feistel-and-tag-seed:" + layout.domain_label(),
         hashlib.sha256,
     ).digest()
 
@@ -696,8 +883,8 @@ def _derive_material(password_bytes: bytes, layout: SqlIdLayout) -> tuple[tuple[
 def _key_material(layout: SqlIdLayout = DEFAULT_LAYOUT) -> tuple[tuple[bytes, ...], bytes]:
     """Return configured key material for the fixed layout or raise an error."""
     if layout != DEFAULT_LAYOUT or not _registry_is_sane():
-        raise _ConfigError("invalid sql_id_library layout")
-    return _derive_material(_password_bytes(), layout)
+        raise _ConfigError("bad_config", "invalid sql_id_library layout")
+    return _derive_material(_password_bytes(), _pepper_bytes(), layout)
 
 
 def is_configured() -> bool:
@@ -945,7 +1132,7 @@ def _decode_public_hex(value: object, *, expected_label: int | None) -> SqlIdVal
             layout=DEFAULT_LAYOUT,
         )
     except _ConfigError as exc:
-        return _validation_error("bad_config", str(exc), public_hex=public_hex, layout=DEFAULT_LAYOUT)
+        return _validation_error(exc.code, exc.message, public_hex=public_hex, layout=DEFAULT_LAYOUT)
     except _ValidationFailure as exc:
         return _validation_error(
             exc.code,

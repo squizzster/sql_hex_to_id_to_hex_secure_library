@@ -10,7 +10,8 @@ Run:
 For real applications, set XCTX_ID_PASSWORD with a strong secret:
     export XCTX_ID_PASSWORD="$(python -c 'import secrets; print(secrets.token_hex(32))')"
 
-Also replace DOMAIN_SALT_HEX in sql_id_library.py for deployed public IDs.
+Also create a pepper file and replace DOMAIN_SALT_HEX in sql_id_library.py for
+deployed public IDs.
 """
 
 from __future__ import annotations
@@ -23,15 +24,19 @@ from pathlib import Path
 
 
 DEMO_HARD_CODED_PASSWORD = "demo-hard-coded-secret-" + ("0123456789abcdef" * 4)
+DEMO_HARD_CODED_PEPPER_HEX = "abcdef0123456789" * 4
 DEMO_BUNDLED_DOMAIN_SALT_HEX = "0b91b4e8fd74bcb256a19d188c83470a7b75a4897babb252e54b6eb8f8bb392d"
 DEMO_LABELS = {"users": 1, "plans": 2, "repair": 3}
 USING_DEMO_HARD_CODED_PASSWORD = False
+USING_DEMO_HARD_CODED_PEPPER = False
 WARNED_BUNDLED_DOMAIN_SALT = False
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
+DEMO_PEPPER_PATH = Path("/tmp/sql_id_library_demo_pepper_please_create_your_own_and_delete_me.key")
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from sql_id_library import (  # noqa: E402 - demo config is set before first probe
+    DEFAULT_PEPPER_FILE_LOCATION,
     DOMAIN_SALT_HEX,
     ENV_PASSWORD_NAME,
     HEX_CHARS,
@@ -46,7 +51,8 @@ from sql_id_library import (  # noqa: E402 - demo config is set before first pro
     TOTAL_BITS,
     VERSION_BITS,
     available_labels,
-    configure_sql_id_labels,
+    configure_sql_id,
+    configured_pepper_file_location,
     hex_to_id,
     hex_to_id_label,
     hex_to_parts,
@@ -54,7 +60,7 @@ from sql_id_library import (  # noqa: E402 - demo config is set before first pro
     id_to_hex_label,
     inspect_hex,
     is_configured,
-    load_sql_id_labels_from_file,
+    load_sql_id_config_from_file,
     validate_hex,
     validate_hex_label,
 )
@@ -78,23 +84,46 @@ def warn_if_using_bundled_domain_salt() -> None:
 
 def ensure_demo_config(*, strict: bool) -> None:
     """Use real env config if valid; otherwise create an in-process demo secret."""
-    global USING_DEMO_HARD_CODED_PASSWORD
+    global USING_DEMO_HARD_CODED_PASSWORD, USING_DEMO_HARD_CODED_PEPPER
 
     if is_configured():
         return
     if strict:
         raise SystemExit(
-            f"{ENV_PASSWORD_NAME} is missing or invalid. Set it with:\n"
-            "  export XCTX_ID_PASSWORD=\"$(python -c 'import secrets; print(secrets.token_hex(32))')\""
+            f"{ENV_PASSWORD_NAME}, the pepper file, or both are missing or invalid. Configure them with:\n"
+            "  export XCTX_ID_PASSWORD=\"$(python -c 'import secrets; print(secrets.token_hex(32))')\"\n"
+            f"  python -c \"import secrets; print(secrets.token_hex(32))\" > {DEFAULT_PEPPER_FILE_LOCATION}\n"
+            f"  chmod 0400 {DEFAULT_PEPPER_FILE_LOCATION}"
         )
 
-    USING_DEMO_HARD_CODED_PASSWORD = True
-    os.environ["XCTX_ID_PASSWORD"] = DEMO_HARD_CODED_PASSWORD
-    print(
-        "Using DEMO_HARD_CODED_PASSWORD for XCTX_ID_PASSWORD. "
-        f"To reproduce this demo run: export XCTX_ID_PASSWORD={DEMO_HARD_CODED_PASSWORD!r}",
-        file=sys.stderr,
-    )
+    password = os.environ.get(ENV_PASSWORD_NAME)
+    password_bytes = password.encode("utf-8") if isinstance(password, str) else b""
+    if len(password_bytes) < 32 or len(set(password_bytes)) < 8:
+        USING_DEMO_HARD_CODED_PASSWORD = True
+        os.environ[ENV_PASSWORD_NAME] = DEMO_HARD_CODED_PASSWORD
+        print(
+            "Using DEMO_HARD_CODED_PASSWORD for XCTX_ID_PASSWORD. "
+            f"To reproduce this demo run: export XCTX_ID_PASSWORD={DEMO_HARD_CODED_PASSWORD!r}",
+            file=sys.stderr,
+        )
+
+    try:
+        if DEMO_PEPPER_PATH.exists():
+            DEMO_PEPPER_PATH.chmod(0o600)
+        DEMO_PEPPER_PATH.write_text(DEMO_HARD_CODED_PEPPER_HEX + "\n", encoding="ascii")
+        DEMO_PEPPER_PATH.chmod(0o400)
+        configure_sql_id({"pepper_file_location": str(DEMO_PEPPER_PATH)})
+        USING_DEMO_HARD_CODED_PEPPER = True
+        print(
+            f"Using demo pepper file at {DEMO_PEPPER_PATH}. "
+            f"Real applications should create {DEFAULT_PEPPER_FILE_LOCATION} with chmod 0400.",
+            file=sys.stderr,
+        )
+    except OSError as exc:
+        raise SystemExit(f"could not create demo pepper file: {exc}") from exc
+
+    if not is_configured():
+        raise SystemExit("demo configuration is still invalid after creating demo password and pepper")
 
 
 def parse_label(value: str | None) -> str | int | None:
@@ -118,7 +147,7 @@ def build_parser() -> argparse.ArgumentParser:
             "  ./bin_demo/sql_id_demo_for_dev.py\n"
             "  ./bin_demo/sql_id_demo_for_dev.py --int_id 1\n"
             "  ./bin_demo/sql_id_demo_for_dev.py --int_id 1 --label users\n"
-            "  ./bin_demo/sql_id_demo_for_dev.py --labels-file ./conf/test_sql_id_labels.yaml --int_id 1 --label repair\n"
+            "  ./bin_demo/sql_id_demo_for_dev.py --config-file ./conf/test_sql_id_config.yaml --int_id 1 --label repair\n"
             "  ./bin_demo/sql_id_demo_for_dev.py --hex_id 65a5cb411fa554a0\n"
             "  ./bin_demo/sql_id_demo_for_dev.py --hex_id 65a5cb411fa554a0 --label users\n"
             "  ./bin_demo/sql_id_demo_for_dev.py --strict-config --int_id 1\n\n"
@@ -132,7 +161,7 @@ def build_parser() -> argparse.ArgumentParser:
     action.add_argument("--int_id", type=int, help="encode this positive SQL integer ID and print public hex")
     action.add_argument("--hex_id", help="strictly decode this public hex ID and print the SQL integer ID")
     parser.add_argument("--label", help="label name or numeric label id to encode with, or to require when decoding")
-    parser.add_argument("--labels-file", help="configure labels from this .json, .yaml, or .yml file")
+    parser.add_argument("--config-file", help="configure labels and/or pepper path from this .json, .yaml, or .yml file")
     parser.add_argument(
         "--strict-config",
         action="store_true",
@@ -180,6 +209,9 @@ def print_config_note() -> None:
     if USING_DEMO_HARD_CODED_PASSWORD:
         print(f"Using DEMO_HARD_CODED_PASSWORD for {ENV_PASSWORD_NAME}.")
         print("Real applications should set a stable secret in the process environment.")
+    if USING_DEMO_HARD_CODED_PEPPER:
+        print(f"Using demo pepper file: {configured_pepper_file_location()}")
+        print("Real applications should use a stable owner-readable pepper file.")
     print()
 
 
@@ -251,7 +283,7 @@ def show_default_demo() -> None:
     print("------------")
     print("  ./bin_demo/sql_id_demo_for_dev.py --int_id 1")
     print("  ./bin_demo/sql_id_demo_for_dev.py --int_id 1 --label users")
-    print("  ./bin_demo/sql_id_demo_for_dev.py --labels-file ./conf/test_sql_id_labels.yaml --int_id 1 --label repair")
+    print("  ./bin_demo/sql_id_demo_for_dev.py --config-file ./conf/test_sql_id_config.yaml --int_id 1 --label repair")
     print("  ./bin_demo/sql_id_demo_for_dev.py --hex_id \"<public_hex>\"")
     print("  ./bin_demo/sql_id_demo_for_dev.py --hex_id \"<public_hex>\" --label users")
     print("  ./bin_demo/sql_id_demo_for_dev.py --help")
@@ -297,13 +329,13 @@ def decode_cli(public_hex: str, *, label: str | int | None, details: bool) -> No
 
 
 def main(argv: Sequence[str] | None = None) -> None:
-    configure_sql_id_labels(DEMO_LABELS)
+    configure_sql_id({"labels": DEMO_LABELS})
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.config_file is not None:
+        load_sql_id_config_from_file(args.config_file)
     warn_if_using_bundled_domain_salt()
     ensure_demo_config(strict=args.strict_config)
-    if args.labels_file is not None:
-        load_sql_id_labels_from_file(args.labels_file)
     label = parse_label(args.label)
 
     if args.int_id is not None:

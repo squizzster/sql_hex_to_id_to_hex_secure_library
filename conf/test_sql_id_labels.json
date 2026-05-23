@@ -1,7 +1,0 @@
-{
-  "dry_run": 1,
-  "plan": 2,
-  "execute": 3,
-  "enquire": 4,
-  "repair": 5
-}

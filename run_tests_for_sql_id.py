@@ -4,8 +4,8 @@
 Run with:
     XCTX_ID_PASSWORD="$(python -c 'import secrets; print(secrets.token_hex(32))')" python run_tests_for_sql_id.py
 
-The tests set a safe default test password when one is not already present, then
-also cover missing, weak, low-diversity, and wrong-password behavior.
+The tests set a safe default test password and per-test pepper file, then also
+cover missing, weak, low-diversity, wrong-password, and wrong-pepper behavior.
 """
 
 from __future__ import annotations
@@ -21,11 +21,21 @@ from unittest import mock
 
 TEST_PASSWORD = "unit-test-secret-" + ("0123456789abcdef" * 4)
 OTHER_TEST_PASSWORD = "different-test-secret-" + ("fedcba9876543210" * 4)
+TEST_PEPPER_HEX = "0123456789abcdef" * 4
+OTHER_TEST_PEPPER_HEX = "fedcba9876543210" * 4
 TEST_DIR = Path(__file__).resolve().parent
 TEST_CONF_DIR = TEST_DIR / "conf"
+TEST_PEPPER_PATH = TEST_DIR / "test_sql_id_pepper.key"
 os.environ.setdefault("XCTX_ID_PASSWORD", TEST_PASSWORD)
 
 import sql_id_library as sid  # noqa: E402  - env default is set before import
+
+
+def write_test_pepper(path: Path, value: str = TEST_PEPPER_HEX, mode: int = 0o400) -> None:
+    """Write a test pepper file with intentionally narrow permissions."""
+    path.unlink(missing_ok=True)
+    path.write_text(value + "\n", encoding="ascii")
+    path.chmod(mode)
 
 
 @contextmanager
@@ -51,16 +61,22 @@ def patched_labels(labels: dict[str, int]):
     """Temporarily patch the local label-name registry."""
     old_labels = sid.available_labels()
     try:
-        sid.configure_sql_id_labels(labels)
+        sid.configure_sql_id({"labels": labels})
         yield
     finally:
-        sid.configure_sql_id_labels(old_labels)
+        sid.configure_sql_id({"labels": old_labels})
 
 
 class SqlIdLibraryTests(unittest.TestCase):
     def setUp(self) -> None:
         os.environ[sid.ENV_PASSWORD_NAME] = TEST_PASSWORD
-        sid.clear_sql_id_labels()
+        write_test_pepper(TEST_PEPPER_PATH)
+        sid.clear_sql_id_config()
+        sid.configure_sql_id({"pepper_file_location": str(TEST_PEPPER_PATH)})
+
+    def tearDown(self) -> None:
+        TEST_PEPPER_PATH.chmod(0o600) if TEST_PEPPER_PATH.exists() else None
+        TEST_PEPPER_PATH.unlink(missing_ok=True)
 
     def assert_public_hex(self, encoded: object) -> str:
         self.assertIsInstance(encoded, str)
@@ -71,7 +87,7 @@ class SqlIdLibraryTests(unittest.TestCase):
     def test_fixed_layout_uses_full_64_bit_budget(self) -> None:
         layout = sid.DEFAULT_LAYOUT
 
-        self.assertEqual(sid.SCHEME_REVISION, 2)
+        self.assertEqual(sid.SCHEME_REVISION, 3)
         self.assertEqual(sid.VERSION_BITS, 3)
         self.assertEqual(sid.LABEL_BITS, 5)
         self.assertEqual(sid.ID_BITS, 32)
@@ -79,7 +95,7 @@ class SqlIdLibraryTests(unittest.TestCase):
         self.assertEqual(sid.TOTAL_BITS, 64)
         self.assertEqual(sid.HEX_CHARS, 16)
         self.assertEqual(sid.SUPPORTED_HEX_LENGTHS, (16,))
-        self.assertEqual(sid.ISSUE_VERSION, 1)
+        self.assertEqual(sid.ISSUE_VERSION, 2)
         self.assertEqual(sid.RESERVED_VERSION, 7)
         self.assertEqual(sid.NO_LABEL, 0)
         self.assertEqual(sid.MAX_LABEL, 30)
@@ -87,6 +103,12 @@ class SqlIdLibraryTests(unittest.TestCase):
         self.assertEqual(sid.MAX_ID, 4_294_967_295)
         self.assertEqual(sid.MYSQL_UNSIGNED_INT_MAX, 4_294_967_295)
         self.assertGreaterEqual(sid.MIN_PASSWORD_BYTES, 32)
+        self.assertEqual(sid.DEFAULT_PEPPER_FILE_LOCATION, "~/.sql_hex_id_pepper_file.key")
+        self.assertEqual(sid.MIN_PEPPER_HEX_CHARS, 64)
+        self.assertEqual(sid.MAX_PEPPER_HEX_CHARS, 256)
+        self.assertEqual(sid.MIN_PEPPER_BYTES, 32)
+        self.assertEqual(sid.MAX_PEPPER_BYTES, 128)
+        self.assertEqual(sid.configured_pepper_file_location(), str(TEST_PEPPER_PATH))
         self.assertGreaterEqual(sid.ROUNDS, 12)
         self.assertRegex(sid.DOMAIN_SALT_HEX, re.compile(r"^[0-9a-fA-F]{64}$"))
         self.assertEqual(len(bytes.fromhex(sid.DOMAIN_SALT_HEX)), 32)
@@ -168,7 +190,7 @@ class SqlIdLibraryTests(unittest.TestCase):
             self.assertEqual(sid.validate_hex_label(plain, "users").error_code, "label_mismatch")
 
     def test_label_registry_validation(self) -> None:
-        sid.configure_sql_id_labels({"users": 1, "Plans": 2})
+        sid.configure_sql_id({"labels": {"users": 1, "Plans": 2}})
         self.assertEqual(sid.available_labels(), {"users": 1, "plans": 2})
         self.assertEqual(sid.hex_to_id_label(sid.id_to_hex_label(1, "users"), "users"), 1)
         copied = sid.available_labels()
@@ -193,11 +215,30 @@ class SqlIdLibraryTests(unittest.TestCase):
         for labels in invalid_registries:
             with self.subTest(labels=repr(labels)):
                 with self.assertRaises(ValueError):
-                    sid.configure_sql_id_labels(labels)  # type: ignore[arg-type]
+                    sid.configure_sql_id({"labels": labels})  # type: ignore[dict-item]
                 self.assertEqual(sid.available_labels(), {"users": 1, "plans": 2})
 
-    def test_load_sql_id_labels_from_json_file(self) -> None:
-        sid.load_sql_id_labels_from_file(TEST_CONF_DIR / "test_sql_id_labels.json")
+    def test_configure_sql_id_accepts_pepper_path_labels_or_both(self) -> None:
+        other_pepper_path = TEST_DIR / "other_test_sql_id_pepper.key"
+        write_test_pepper(other_pepper_path, OTHER_TEST_PEPPER_HEX)
+        try:
+            sid.configure_sql_id({"labels": {"users": 1}})
+            self.assertEqual(sid.available_labels(), {"users": 1})
+            self.assertEqual(sid.configured_pepper_file_location(), str(TEST_PEPPER_PATH))
+
+            sid.configure_sql_id({"pepper_file_location": str(other_pepper_path)})
+            self.assertEqual(sid.available_labels(), {"users": 1})
+            self.assertEqual(sid.configured_pepper_file_location(), str(other_pepper_path))
+
+            sid.configure_sql_id({"pepper_file_location": str(TEST_PEPPER_PATH), "labels": {"plans": 2}})
+            self.assertEqual(sid.available_labels(), {"plans": 2})
+            self.assertEqual(sid.configured_pepper_file_location(), str(TEST_PEPPER_PATH))
+        finally:
+            other_pepper_path.chmod(0o600) if other_pepper_path.exists() else None
+            other_pepper_path.unlink(missing_ok=True)
+
+    def test_load_sql_id_config_from_json_file(self) -> None:
+        sid.load_sql_id_config_from_file(TEST_CONF_DIR / "test_sql_id_config.json")
         self.assertEqual(
             sid.available_labels(),
             {
@@ -212,13 +253,13 @@ class SqlIdLibraryTests(unittest.TestCase):
         self.assertEqual(sid.hex_to_id_label(encoded, "repair"), 123)
         self.assertIsNone(sid.hex_to_id_label(encoded, "plan"))
 
-    def test_load_sql_id_labels_from_yaml_file_when_yaml_is_available(self) -> None:
+    def test_load_sql_id_config_from_yaml_file_when_yaml_is_available(self) -> None:
         try:
             import yaml  # noqa: F401
         except ImportError:
             self.skipTest("PyYAML is not installed")
 
-        sid.load_sql_id_labels_from_file(TEST_CONF_DIR / "test_sql_id_labels.yaml")
+        sid.load_sql_id_config_from_file(TEST_CONF_DIR / "test_sql_id_config.yaml")
         self.assertEqual(
             sid.available_labels(),
             {
@@ -233,101 +274,109 @@ class SqlIdLibraryTests(unittest.TestCase):
         self.assertEqual(sid.hex_to_id_label(encoded, "execute"), 123)
         self.assertIsNone(sid.hex_to_id_label(encoded, "repair"))
 
-    def test_load_sql_id_labels_from_file_uses_cache_until_explicit_reload(self) -> None:
-        json_path = TEST_DIR / "cached_sql_id_labels.json"
-        json_path.write_text('{"dry_run": 1}\n', encoding="utf-8")
+    def test_load_sql_id_config_from_file_uses_cache_until_explicit_reload(self) -> None:
+        json_path = TEST_DIR / "cached_sql_id_config.json"
+        json_path.write_text('{"labels": {"dry_run": 1}}\n', encoding="utf-8")
         try:
-            sid.load_sql_id_labels_from_file(json_path)
+            sid.load_sql_id_config_from_file(json_path)
             self.assertEqual(sid.available_labels(), {"dry_run": 1})
 
-            json_path.write_text('{"repair": 5}\n', encoding="utf-8")
-            sid.load_sql_id_labels_from_file(json_path)
+            json_path.write_text('{"labels": {"repair": 5}}\n', encoding="utf-8")
+            sid.load_sql_id_config_from_file(json_path)
             self.assertEqual(sid.available_labels(), {"dry_run": 1})
 
             json_path.write_text("[1, 2, 3]\n", encoding="utf-8")
             with self.assertRaises(ValueError):
-                sid.reload_sql_id_labels_from_file(json_path)
+                sid.reload_sql_id_config_from_file(json_path)
             self.assertEqual(sid.available_labels(), {"dry_run": 1})
 
-            json_path.write_text('{"repair": 5}\n', encoding="utf-8")
-            sid.reload_sql_id_labels_from_file(json_path)
+            json_path.write_text('{"labels": {"repair": 5}}\n', encoding="utf-8")
+            sid.reload_sql_id_config_from_file(json_path)
             self.assertEqual(sid.available_labels(), {"repair": 5})
 
-            json_path.write_text('{"execute": 3}\n', encoding="utf-8")
-            sid.load_sql_id_labels_from_file(json_path)
+            json_path.write_text('{"labels": {"execute": 3}}\n', encoding="utf-8")
+            sid.load_sql_id_config_from_file(json_path)
             self.assertEqual(sid.available_labels(), {"repair": 5})
 
-            sid.clear_sql_id_labels()
-            json_path.write_text('{"plan": 2}\n', encoding="utf-8")
-            sid.load_sql_id_labels_from_file(json_path)
+            sid.clear_sql_id_config()
+            sid.configure_sql_id({"pepper_file_location": str(TEST_PEPPER_PATH)})
+            json_path.write_text('{"labels": {"plan": 2}}\n', encoding="utf-8")
+            sid.load_sql_id_config_from_file(json_path)
             self.assertEqual(sid.available_labels(), {"plan": 2})
         finally:
             json_path.unlink(missing_ok=True)
 
-    def test_re_load_sql_id_labels_from_file_alias_refreshes_cache(self) -> None:
-        json_path = TEST_DIR / "re_load_alias_sql_id_labels.json"
-        json_path.write_text('{"dry_run": 1}\n', encoding="utf-8")
+    def test_load_sql_id_config_from_file_can_set_pepper_location(self) -> None:
+        json_path = TEST_DIR / "pepper_path_sql_id_config.json"
+        other_pepper_path = TEST_DIR / "config_sql_id_pepper.key"
+        write_test_pepper(other_pepper_path, OTHER_TEST_PEPPER_HEX)
+        json_path.write_text(
+            '{"pepper_file_location": "' + str(other_pepper_path) + '", "labels": {"dry_run": 1}}\n',
+            encoding="utf-8",
+        )
         try:
-            sid.load_sql_id_labels_from_file(json_path)
+            before = self.assert_public_hex(sid.id_to_hex(123))
+            sid.load_sql_id_config_from_file(json_path)
             self.assertEqual(sid.available_labels(), {"dry_run": 1})
-
-            json_path.write_text('{"execute": 3}\n', encoding="utf-8")
-            sid.re_load_sql_id_labels_from_file(json_path)
-            self.assertEqual(sid.available_labels(), {"execute": 3})
+            self.assertEqual(sid.configured_pepper_file_location(), str(other_pepper_path))
+            after = self.assert_public_hex(sid.id_to_hex(123))
+            self.assertNotEqual(before, after)
         finally:
             json_path.unlink(missing_ok=True)
+            other_pepper_path.chmod(0o600) if other_pepper_path.exists() else None
+            other_pepper_path.unlink(missing_ok=True)
 
     def test_cached_label_files_share_same_stem_across_json_and_yaml_paths(self) -> None:
         json_path = TEST_DIR / "same_stem_cached_labels.json"
         yaml_path = TEST_DIR / "same_stem_cached_labels.yaml"
-        json_path.write_text('{"dry_run": 1}\n', encoding="utf-8")
-        yaml_path.write_text("1: dry_run\n", encoding="utf-8")
+        json_path.write_text('{"labels": {"dry_run": 1}}\n', encoding="utf-8")
+        yaml_path.write_text("labels:\n  1: dry_run\n", encoding="utf-8")
         try:
-            sid.load_sql_id_labels_from_file(json_path)
+            sid.load_sql_id_config_from_file(json_path)
             self.assertEqual(sid.available_labels(), {"dry_run": 1})
             with self.assertRaises(ValueError):
-                sid.load_sql_id_labels_from_file(TEST_DIR / "same_stem_cached_labels.txt")
+                sid.load_sql_id_config_from_file(TEST_DIR / "same_stem_cached_labels.txt")
 
-            json_path.write_text('{"repair": 5}\n', encoding="utf-8")
-            yaml_path.write_text("5: repair\n", encoding="utf-8")
-            sid.load_sql_id_labels_from_file(yaml_path)
+            json_path.write_text('{"labels": {"repair": 5}}\n', encoding="utf-8")
+            yaml_path.write_text("labels:\n  5: repair\n", encoding="utf-8")
+            sid.load_sql_id_config_from_file(yaml_path)
             self.assertEqual(sid.available_labels(), {"dry_run": 1})
 
-            sid.reload_sql_id_labels_from_file(yaml_path)
+            sid.reload_sql_id_config_from_file(yaml_path)
             self.assertEqual(sid.available_labels(), {"repair": 5})
         finally:
             json_path.unlink(missing_ok=True)
             yaml_path.unlink(missing_ok=True)
 
-    def test_load_sql_id_labels_from_file_rejects_bad_inputs(self) -> None:
-        sid.configure_sql_id_labels({"users": 1})
+    def test_load_sql_id_config_from_file_rejects_bad_inputs(self) -> None:
+        sid.configure_sql_id({"labels": {"users": 1}})
         bad_json_path = TEST_DIR / "bad_sql_id_labels.json"
         bad_json_path.write_text("[1, 2, 3]", encoding="utf-8")
         try:
             with self.assertRaises(ValueError):
-                sid.load_sql_id_labels_from_file(bad_json_path)
+                sid.load_sql_id_config_from_file(bad_json_path)
             self.assertEqual(sid.available_labels(), {"users": 1})
             with self.assertRaises(ValueError):
-                sid.load_sql_id_labels_from_file(TEST_DIR / "missing.sqlid")
+                sid.load_sql_id_config_from_file(TEST_DIR / "missing.sqlid")
             self.assertEqual(sid.available_labels(), {"users": 1})
         finally:
             bad_json_path.unlink(missing_ok=True)
 
-    def test_load_sql_id_labels_from_json_rejects_duplicate_keys_and_names(self) -> None:
+    def test_load_sql_id_config_from_json_rejects_duplicate_keys_and_names(self) -> None:
         duplicate_key_path = TEST_DIR / "duplicate_key_sql_id_labels.json"
         duplicate_name_path = TEST_DIR / "duplicate_name_sql_id_labels.json"
-        duplicate_key_path.write_text('{"plan": 1, "plan": 2}\n', encoding="utf-8")
-        duplicate_name_path.write_text('{"1": "plan", "2": "PLAN"}\n', encoding="utf-8")
+        duplicate_key_path.write_text('{"labels": {"plan": 1, "plan": 2}}\n', encoding="utf-8")
+        duplicate_name_path.write_text('{"labels": {"1": "plan", "2": "PLAN"}}\n', encoding="utf-8")
         try:
             with self.assertRaises(ValueError):
-                sid.load_sql_id_labels_from_file(duplicate_key_path)
+                sid.load_sql_id_config_from_file(duplicate_key_path)
             with self.assertRaises(ValueError):
-                sid.load_sql_id_labels_from_file(duplicate_name_path)
+                sid.load_sql_id_config_from_file(duplicate_name_path)
         finally:
             duplicate_key_path.unlink(missing_ok=True)
             duplicate_name_path.unlink(missing_ok=True)
 
-    def test_load_sql_id_labels_from_yaml_rejects_duplicate_keys_names_and_bool_keys(self) -> None:
+    def test_load_sql_id_config_from_yaml_rejects_duplicate_keys_names_and_bool_keys(self) -> None:
         try:
             import yaml  # noqa: F401
         except ImportError:
@@ -336,24 +385,24 @@ class SqlIdLibraryTests(unittest.TestCase):
         duplicate_key_path = TEST_DIR / "duplicate_key_sql_id_labels.yaml"
         duplicate_name_path = TEST_DIR / "duplicate_name_sql_id_labels.yaml"
         bool_key_path = TEST_DIR / "bool_key_sql_id_labels.yaml"
-        duplicate_key_path.write_text("1: dry_run\n1: plan\n", encoding="utf-8")
-        duplicate_name_path.write_text("1: plan\n2: PLAN\n", encoding="utf-8")
-        bool_key_path.write_text("true: dry_run\n", encoding="utf-8")
+        duplicate_key_path.write_text("labels:\n  1: dry_run\n  1: plan\n", encoding="utf-8")
+        duplicate_name_path.write_text("labels:\n  1: plan\n  2: PLAN\n", encoding="utf-8")
+        bool_key_path.write_text("labels:\n  true: dry_run\n", encoding="utf-8")
         try:
             with self.assertRaises(ValueError):
-                sid.load_sql_id_labels_from_file(duplicate_key_path)
+                sid.load_sql_id_config_from_file(duplicate_key_path)
             with self.assertRaises(ValueError):
-                sid.load_sql_id_labels_from_file(duplicate_name_path)
+                sid.load_sql_id_config_from_file(duplicate_name_path)
             with self.assertRaises(ValueError):
-                sid.load_sql_id_labels_from_file(bool_key_path)
+                sid.load_sql_id_config_from_file(bool_key_path)
         finally:
             duplicate_key_path.unlink(missing_ok=True)
             duplicate_name_path.unlink(missing_ok=True)
             bool_key_path.unlink(missing_ok=True)
 
-    def test_load_sql_id_labels_from_yaml_errors_when_yaml_dependency_is_missing(self) -> None:
+    def test_load_sql_id_config_from_yaml_errors_when_yaml_dependency_is_missing(self) -> None:
         yaml_path = TEST_DIR / "no_yaml_dependency_sql_id_labels.yaml"
-        yaml_path.write_text("1: dry_run\n", encoding="utf-8")
+        yaml_path.write_text("labels:\n  1: dry_run\n", encoding="utf-8")
 
         real_import = builtins.__import__
 
@@ -365,39 +414,39 @@ class SqlIdLibraryTests(unittest.TestCase):
         try:
             with mock.patch("builtins.__import__", side_effect=fake_import):
                 with self.assertRaises(ValueError):
-                    sid.load_sql_id_labels_from_file(yaml_path)
+                    sid.load_sql_id_config_from_file(yaml_path)
         finally:
             yaml_path.unlink(missing_ok=True)
 
-    def test_load_sql_id_labels_from_file_requires_same_stem_files_to_match(self) -> None:
+    def test_load_sql_id_config_from_file_requires_same_stem_files_to_match(self) -> None:
         json_path = TEST_DIR / "mismatch_sql_id_labels.json"
         yaml_path = TEST_DIR / "mismatch_sql_id_labels.yaml"
-        json_path.write_text('{"dry_run": 1, "plan": 2}\n', encoding="utf-8")
-        yaml_path.write_text("1: dry_run\n2: execute\n", encoding="utf-8")
+        json_path.write_text('{"labels": {"dry_run": 1, "plan": 2}}\n', encoding="utf-8")
+        yaml_path.write_text("labels:\n  1: dry_run\n  2: execute\n", encoding="utf-8")
         try:
             with self.assertRaises(ValueError):
-                sid.load_sql_id_labels_from_file(json_path)
+                sid.load_sql_id_config_from_file(json_path)
             with self.assertRaises(ValueError):
-                sid.load_sql_id_labels_from_file(yaml_path)
+                sid.load_sql_id_config_from_file(yaml_path)
         finally:
             json_path.unlink(missing_ok=True)
             yaml_path.unlink(missing_ok=True)
 
-    def test_load_sql_id_labels_from_file_rejects_files_over_2000_bytes(self) -> None:
+    def test_load_sql_id_config_from_file_rejects_files_over_2000_bytes(self) -> None:
         large_path = TEST_DIR / "large_sql_id_labels.json"
         large_path.write_text(" " * 2001, encoding="utf-8")
         try:
             with self.assertRaises(ValueError):
-                sid.load_sql_id_labels_from_file(large_path)
+                sid.load_sql_id_config_from_file(large_path)
         finally:
             large_path.unlink(missing_ok=True)
 
-    def test_load_sql_id_labels_from_file_accepts_exactly_2000_bytes(self) -> None:
+    def test_load_sql_id_config_from_file_accepts_exactly_2000_bytes(self) -> None:
         exact_path = TEST_DIR / "exact_size_sql_id_labels.json"
-        payload = '{"dry_run": 1}'
+        payload = '{"labels": {"dry_run": 1}}'
         exact_path.write_text(payload + (" " * (2000 - len(payload))), encoding="utf-8")
         try:
-            sid.load_sql_id_labels_from_file(exact_path)
+            sid.load_sql_id_config_from_file(exact_path)
             self.assertEqual(sid.available_labels(), {"dry_run": 1})
         finally:
             exact_path.unlink(missing_ok=True)
@@ -436,6 +485,32 @@ class SqlIdLibraryTests(unittest.TestCase):
         with patched_password("0123456789abcdef" * 2):
             self.assertTrue(sid.is_configured())
             self.assertIsNotNone(sid.id_to_hex(1))
+
+    def test_pepper_file_config_errors_are_specific(self) -> None:
+        cases = [
+            ("missing_sql_id_pepper.key", None, None, "missing_pepper_file"),
+            ("short_sql_id_pepper.key", "0123456789abcdef", 0o400, "pepper_too_short"),
+            ("long_sql_id_pepper.key", "01" * 129, 0o400, "pepper_too_long"),
+            ("odd_sql_id_pepper.key", ("01" * 32) + "0", 0o400, "invalid_pepper_hex"),
+            ("nonhex_sql_id_pepper.key", "g" * 64, 0o400, "invalid_pepper_hex"),
+            ("low_diversity_sql_id_pepper.key", "00" * 32, 0o400, "low_diversity_pepper"),
+            ("world_readable_sql_id_pepper.key", TEST_PEPPER_HEX, 0o644, "bad_pepper_permissions"),
+        ]
+
+        for filename, contents, mode, code in cases:
+            pepper_path = TEST_DIR / filename
+            pepper_path.unlink(missing_ok=True)
+            if contents is not None and mode is not None:
+                write_test_pepper(pepper_path, contents, mode)
+            try:
+                sid.configure_sql_id({"pepper_file_location": str(pepper_path)})
+                self.assertFalse(sid.is_configured(), code)
+                self.assertIsNone(sid.id_to_hex(1))
+                self.assertEqual(sid.validate_hex("0" * sid.HEX_CHARS).error_code, code)
+            finally:
+                pepper_path.chmod(0o600) if pepper_path.exists() else None
+                pepper_path.unlink(missing_ok=True)
+                sid.configure_sql_id({"pepper_file_location": str(TEST_PEPPER_PATH)})
 
     def test_encoding_is_deterministic_for_same_password_id_and_label(self) -> None:
         first = self.assert_public_hex(sid.id_to_hex(123))
@@ -478,6 +553,36 @@ class SqlIdLibraryTests(unittest.TestCase):
                     self.assertIsNone(sid.hex_to_id(encoded))
                     self.assertIsNone(sid.hex_to_id_label(encoded, 1))
                     self.assertFalse(sid.inspect_hex(encoded).ok)
+
+    def test_different_pepper_cannot_decode_existing_public_id(self) -> None:
+        other_pepper_path = TEST_DIR / "other_decode_sql_id_pepper.key"
+        write_test_pepper(other_pepper_path, OTHER_TEST_PEPPER_HEX)
+        encoded_values = [
+            self.assert_public_hex(sid.id_to_hex(123)),
+            self.assert_public_hex(sid.id_to_hex_label(123, 1)),
+        ]
+        try:
+            sid.configure_sql_id({"pepper_file_location": str(other_pepper_path)})
+            for encoded in encoded_values:
+                with self.subTest(encoded=encoded):
+                    self.assertIsNone(sid.hex_to_id(encoded))
+                    self.assertIsNone(sid.hex_to_id_label(encoded, 1))
+                    self.assertFalse(sid.inspect_hex(encoded).ok)
+        finally:
+            other_pepper_path.chmod(0o600) if other_pepper_path.exists() else None
+            other_pepper_path.unlink(missing_ok=True)
+            sid.configure_sql_id({"pepper_file_location": str(TEST_PEPPER_PATH)})
+
+    def test_pepper_file_changes_require_explicit_reload(self) -> None:
+        first = self.assert_public_hex(sid.id_to_hex(123))
+        write_test_pepper(TEST_PEPPER_PATH, OTHER_TEST_PEPPER_HEX)
+
+        self.assertEqual(sid.id_to_hex(123), first)
+
+        sid.reload_sql_id_pepper()
+        second = self.assert_public_hex(sid.id_to_hex(123))
+        self.assertNotEqual(second, first)
+        self.assertIsNone(sid.hex_to_id(first))
 
     def test_invalid_id_inputs_return_none(self) -> None:
         invalid_base_values = [
@@ -596,7 +701,7 @@ class SqlIdLibraryTests(unittest.TestCase):
     def test_valid_tag_for_inactive_versions_is_rejected(self) -> None:
         round_keys, tag_key = sid._key_material()
         id_index = 0
-        for inactive_version in [0, 2, 6, sid.RESERVED_VERSION]:
+        for inactive_version in [0, 1, 6, sid.RESERVED_VERSION]:
             with self.subTest(inactive_version=inactive_version):
                 plain = sid._pack_plain(inactive_version, sid.NO_LABEL, id_index, tag_key)
                 encoded = f"{sid._feistel_encrypt(plain, round_keys):0{sid.HEX_CHARS}x}"

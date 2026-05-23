@@ -20,27 +20,39 @@ No UUID primary keys.
 No public-ID lookup table.
 No exposed sequential IDs.
 
-For deployment setup, including the public-ID salt and runtime secret, see
-[INSTALL.md](INSTALL.md).
+For deployment setup, including the public-ID salt, runtime secret, and pepper
+file, see [INSTALL.md](INSTALL.md).
 
 ---
 
 ## Deployment Hardening
 
-For deployed public IDs, replace `DOMAIN_SALT_HEX` near the top of
-`sql_id_library.py` with a deployment-specific 32-byte random hex value:
+For deployed public IDs, use three independent inputs:
+
+- `DOMAIN_SALT_HEX` near the top of `sql_id_library.py`
+- `XCTX_ID_PASSWORD` in the process environment
+- a disk pepper file, defaulting to `~/.sql_hex_id_pepper_file.key`
+
+Generate each one independently:
 
 ```bash
 python -c "import secrets; print(secrets.token_hex(32))"
 ```
 
-The bundled salt is public and is accepted by the library, but changing it is
-strongly recommended for public-ID deployment hardening. If an attacker does not
-have the deployment salt, they need both the deployed source/config value and
-`XCTX_ID_PASSWORD` to reproduce the public-ID scheme.
+The pepper file must contain hex only, with `64..256` hex characters. The
+minimum is exactly what the command above prints: `64` hex characters, or `32`
+bytes.
 
-Generate `DOMAIN_SALT_HEX` and `XCTX_ID_PASSWORD` independently. Changing either
-value after public IDs have been issued makes those existing public IDs stop
+Recommended pepper setup:
+
+```bash
+python -c "import secrets; print(secrets.token_hex(32))" > ~/.sql_hex_id_pepper_file.key
+chmod 0400 ~/.sql_hex_id_pepper_file.key
+```
+
+The bundled salt is public and is accepted by the library, but changing it is
+strongly recommended for deployment hardening. Changing the salt, password, or
+pepper after public IDs have been issued makes those existing public IDs stop
 decoding.
 
 ---
@@ -66,7 +78,7 @@ Capacity:
 
 | Field   | Values                                      |
 | ------- | ------------------------------------------- |
-| Version | `0..7`; issues `1`; `2..6` inactive/future; `0`, `7` reserved |
+| Version | `0..7`; issues `2`; `1`, `3..6` inactive/future; `0`, `7` reserved |
 | Label   | `0` means no label, `1..30` named, `31` reserved |
 | SQL ID  | `1..4,294,967,295`                          |
 | Tag     | 24 keyed validation bits                    |
@@ -100,15 +112,17 @@ Use labels when the public ID should carry a numeric table/type/bucket label:
 
 ```python
 from sql_id_library import (
-    configure_sql_id_labels,
+    configure_sql_id,
     hex_to_id_label,
     id_to_hex_label,
 )
 
-configure_sql_id_labels({
-    "users": 1,
-    "plans": 2,
-    "repair": 3,
+configure_sql_id({
+    "labels": {
+        "users": 1,
+        "plans": 2,
+        "repair": 3,
+    },
 })
 
 public_hex = id_to_hex_label(123, "users")
@@ -118,66 +132,96 @@ user_id = hex_to_id_label(public_hex, "users")
 You can configure all labels at once in code:
 
 ```python
-configure_sql_id_labels({
-    "dry_run": 1,
-    "plan": 2,
-    "execute": 3,
-    "enquire": 4,
-    "repair": 5,
+configure_sql_id({
+    "labels": {
+        "dry_run": 1,
+        "plan": 2,
+        "execute": 3,
+        "enquire": 4,
+        "repair": 5,
+    },
 })
 ```
 
-Or load labels from a file:
+You can also configure only the pepper path, or both values together:
 
 ```python
-from sql_id_library import load_sql_id_labels_from_file
+configure_sql_id({
+    "pepper_file_location": "/etc/myapp/sql_hex_id_pepper.key",
+})
 
-load_sql_id_labels_from_file("./conf/test_sql_id_labels.json")
-load_sql_id_labels_from_file("./conf/test_sql_id_labels.yaml")
+configure_sql_id({
+    "pepper_file_location": "/etc/myapp/sql_hex_id_pepper.key",
+    "labels": {
+        "users": 1,
+        "plans": 2,
+    },
+})
+```
+
+Or load SQL ID config from a file:
+
+```python
+from sql_id_library import load_sql_id_config_from_file
+
+load_sql_id_config_from_file("./conf/test_sql_id_config.json")
+load_sql_id_config_from_file("./conf/test_sql_id_config.yaml")
 ```
 
 JSON support uses the Python standard library. YAML support is optional and
 requires PyYAML; if it is unavailable, loading a YAML file raises `ValueError`.
 If same-stem files exist in more than one supported format, for example
-`conf/test_sql_id_labels.json` and `conf/test_sql_id_labels.yaml`, the loader
+`conf/test_sql_id_config.json` and `conf/test_sql_id_config.yaml`, the loader
 reads every available same-stem `.json`, `.yaml`, and `.yml` file and refuses to
-continue unless they normalize to exactly the same label registry. Each label
+continue unless they normalize to exactly the same SQL ID config. Each config
 file must be `2000` bytes or smaller. Duplicate file keys, duplicate normalized
 label names, duplicate label IDs, boolean label IDs, and YAML boolean keys are
 rejected.
 
-File-loaded labels are cached automatically after the first successful load.
-Later calls to `load_sql_id_labels_from_file()` for the same same-stem path
-reuse the cached registry and do not re-read disk. Encoding and decoding use the
-in-memory registry only. If application logic intentionally needs to re-read
-label files from disk, call:
+File-loaded config is cached automatically after the first successful load.
+Later calls to `load_sql_id_config_from_file()` for the same same-stem path
+reuse the cached config and do not re-read disk. Encoding and decoding use the
+in-memory config only. If application logic intentionally needs to re-read
+config files from disk, call:
 
 ```python
-from sql_id_library import reload_sql_id_labels_from_file
+from sql_id_library import reload_sql_id_config_from_file
 
-reload_sql_id_labels_from_file("./conf/test_sql_id_labels.yaml")
+reload_sql_id_config_from_file("./conf/test_sql_id_config.yaml")
 ```
 
-`re_load_sql_id_labels_from_file()` is also available as a spelling-friendly
-alias for explicit application-controlled reloads.
+The pepper file is also cached after first successful validation for the
+configured path. If application logic intentionally rotates or rewrites the
+pepper file while the process is running, call:
+
+```python
+from sql_id_library import reload_sql_id_pepper
+
+reload_sql_id_pepper()
+```
 
 Supported file shapes:
 
 ```yaml
-1: dry_run
-2: plan
-3: execute
-4: enquire
-5: repair
+pepper_file_location: ~/.sql_hex_id_pepper_file.key
+labels:
+  1: dry_run
+  2: plan
+  3: execute
+  4: enquire
+  5: repair
 ```
 
 ```json
 {
-  "dry_run": 1,
-  "plan": 2,
-  "execute": 3,
-  "enquire": 4,
-  "repair": 5
+  "pepper_file_location": "~/.sql_hex_id_pepper_file.key",
+  "labels": {
+    "dry_run": 1,
+    "plan": 2,
+    "execute": 3,
+    "enquire": 4,
+    "repair": 5
+  }
 }
 ```
 
@@ -248,7 +292,14 @@ Typical errors include:
 | `not_string`          | Input was not a string                  |
 | `invalid_hex`         | Input contained non-hex characters      |
 | `unsupported_length`  | Public ID was not exactly 16 hex chars  |
-| `bad_config`          | Secret is missing or too weak           |
+| `bad_config`          | Password, salt, or layout config failed |
+| `missing_pepper_file` | Pepper file does not exist              |
+| `unreadable_pepper_file` | Pepper file could not be read        |
+| `bad_pepper_permissions` | Pepper file permissions are unsafe   |
+| `pepper_too_short`    | Pepper hex is shorter than 64 chars     |
+| `pepper_too_long`     | Pepper hex is longer than 256 chars     |
+| `invalid_pepper_hex`  | Pepper file did not contain valid hex   |
+| `low_diversity_pepper` | Pepper bytes had too little diversity  |
 | `tag_mismatch`        | Keyed validation tag did not match      |
 | `unsupported_version` | Decoded version is not active           |
 | `reserved_label`      | Decoded label is reserved               |
@@ -259,18 +310,29 @@ Typical errors include:
 
 ## Configuration
 
-Set `XCTX_ID_PASSWORD` to a strong secret after setting the deployment salt.
+Set all three key inputs before issuing IDs:
 
-Use at least 32 UTF-8 bytes:
+1. `DOMAIN_SALT_HEX` in source/config.
+2. `XCTX_ID_PASSWORD` in the environment.
+3. A readable pepper file at the configured `pepper_file_location`.
+
+Use at least 32 UTF-8 bytes for the password:
 
 ```bash
 export XCTX_ID_PASSWORD="$(python -c 'import secrets; print(secrets.token_hex(32))')"
 ```
 
+Use `64..256` hex characters for the pepper:
+
+```bash
+python -c "import secrets; print(secrets.token_hex(32))" > ~/.sql_hex_id_pepper_file.key
+chmod 0400 ~/.sql_hex_id_pepper_file.key
+```
+
 Keep it private.
 Keep it stable.
-Rotate it deliberately; changing it makes previously issued public IDs stop
-decoding. Do not reuse `DOMAIN_SALT_HEX` as `XCTX_ID_PASSWORD`.
+Rotate deliberately; changing the salt, password, or pepper makes previously
+issued public IDs stop decoding. Do not reuse one value for another.
 
 ---
 
@@ -363,7 +425,7 @@ It does not mean access granted.
 ./bin_demo/sql_id_demo_for_dev.py
 ./bin_demo/sql_id_demo_for_dev.py --int_id 1
 ./bin_demo/sql_id_demo_for_dev.py --int_id 1 --label users
-./bin_demo/sql_id_demo_for_dev.py --labels-file ./conf/test_sql_id_labels.yaml --int_id 1 --label repair
+./bin_demo/sql_id_demo_for_dev.py --config-file ./conf/test_sql_id_config.yaml --int_id 1 --label repair
 ./bin_demo/sql_id_demo_for_dev.py --hex_id "<public_hex>"
 ./bin_demo/sql_id_demo_for_dev.py --hex_id "<public_hex>" --label users
 ```
@@ -376,4 +438,4 @@ plans=2
 repair=3
 ```
 
-Applications should configure their own label registry at startup.
+Applications should configure their own pepper path and label registry at startup.
