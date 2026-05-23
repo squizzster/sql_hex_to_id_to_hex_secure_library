@@ -451,6 +451,20 @@ class SqlIdLibraryTests(unittest.TestCase):
         finally:
             exact_path.unlink(missing_ok=True)
 
+    def test_load_sql_id_config_from_file_expands_home(self) -> None:
+        with mock.patch.dict(os.environ, {"HOME": str(TEST_DIR)}):
+            sid.load_sql_id_config_from_file("~/conf/test_sql_id_config.json")
+        self.assertEqual(
+            sid.available_labels(),
+            {
+                "dry_run": 1,
+                "plan": 2,
+                "execute": 3,
+                "enquire": 4,
+                "repair": 5,
+            },
+        )
+
     def test_invalid_label_inputs_fail_closed(self) -> None:
         public_hex = self.assert_public_hex(sid.id_to_hex_label(1, 1))
         invalid_labels = [None, True, False, 0, 31, 32, -1, "", "unknown", "1", "bad-name", [], {}, object()]
@@ -511,6 +525,26 @@ class SqlIdLibraryTests(unittest.TestCase):
                 pepper_path.chmod(0o600) if pepper_path.exists() else None
                 pepper_path.unlink(missing_ok=True)
                 sid.configure_sql_id({"pepper_file_location": str(TEST_PEPPER_PATH)})
+
+    def test_pepper_file_symlink_is_rejected(self) -> None:
+        if os.name != "posix" or not hasattr(os, "symlink"):
+            self.skipTest("POSIX symlink behavior only")
+
+        target_path = TEST_DIR / "target_sql_id_pepper.key"
+        symlink_path = TEST_DIR / "symlink_sql_id_pepper.key"
+        write_test_pepper(target_path, TEST_PEPPER_HEX)
+        symlink_path.unlink(missing_ok=True)
+        symlink_path.symlink_to(target_path)
+        try:
+            sid.configure_sql_id({"pepper_file_location": str(symlink_path)})
+            self.assertFalse(sid.is_configured())
+            self.assertIsNone(sid.id_to_hex(1))
+            self.assertEqual(sid.validate_hex("0" * sid.HEX_CHARS).error_code, "bad_pepper_file")
+        finally:
+            symlink_path.unlink(missing_ok=True)
+            target_path.chmod(0o600) if target_path.exists() else None
+            target_path.unlink(missing_ok=True)
+            sid.configure_sql_id({"pepper_file_location": str(TEST_PEPPER_PATH)})
 
     def test_encoding_is_deterministic_for_same_password_id_and_label(self) -> None:
         first = self.assert_public_hex(sid.id_to_hex(123))

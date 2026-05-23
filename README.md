@@ -190,9 +190,11 @@ from sql_id_library import reload_sql_id_config_from_file
 reload_sql_id_config_from_file("./conf/test_sql_id_config.yaml")
 ```
 
-The pepper file is also cached after first successful validation for the
-configured path. If application logic intentionally rotates or rewrites the
-pepper file while the process is running, call:
+The pepper file is opened without following symlinks on POSIX systems, then
+validated and read through that same file descriptor. It is cached after first
+successful validation for the configured path. If application logic
+intentionally rotates or rewrites the pepper file while the process is running,
+call:
 
 ```python
 from sql_id_library import reload_sql_id_pepper

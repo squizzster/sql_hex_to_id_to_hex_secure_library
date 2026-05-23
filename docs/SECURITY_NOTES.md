@@ -104,9 +104,10 @@ python -c "import secrets; print(secrets.token_hex(32))" > ~/.sql_hex_id_pepper_
 chmod 0400 ~/.sql_hex_id_pepper_file.key
 ```
 
-On POSIX systems, the library rejects pepper files that allow execution, group
-write, or any other-user access. The application process must still be able to
-read the file.
+On POSIX systems, the library opens pepper files without following symlinks and
+then validates and reads through that same file descriptor. It rejects pepper
+files that allow execution, group write, or any other-user access. The
+application process must still be able to read the file.
 
 Changing `DOMAIN_SALT_HEX`, `XCTX_ID_PASSWORD`, or the pepper after public IDs
 have been issued makes those existing public IDs stop decoding.
@@ -244,6 +245,7 @@ For bearer-token uses, generate independent random tokens of at least 128 bits.
 - Cached file loads and config installs are protected by the same lock.
 - `reload_sql_id_config_from_file()` explicitly re-reads files and refreshes the cache.
 - `reload_sql_id_pepper()` explicitly re-reads the currently configured pepper file and clears derived key-material cache.
+- Pepper file permission and symlink checks are performed when the pepper is loaded or explicitly reloaded.
 - YAML loading requires optional PyYAML; unavailable YAML support raises `ValueError`.
 - Same-stem `.json`, `.yaml`, and `.yml` files are cross-checked and must match exactly after normalization.
 - Config files larger than 2000 bytes are rejected.

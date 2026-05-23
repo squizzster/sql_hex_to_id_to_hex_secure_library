@@ -85,6 +85,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import errno
 import json
 import os
 import re
@@ -138,8 +139,9 @@ SUPPORTED_HEX_LENGTHS: Final[tuple[int, ...]] = (HEX_CHARS,)
 #
 #     python -c "import secrets; print(secrets.token_hex(32))"
 #
-# Generate this independently from XCTX_ID_PASSWORD. Changing either value after
-# issuing public IDs intentionally creates a new scheme and breaks old IDs.
+# Generate this independently from XCTX_ID_PASSWORD and the pepper file.
+# Changing any of those values after issuing public IDs intentionally creates a
+# new scheme and breaks old IDs.
 DOMAIN_SALT_HEX: Final[str] = "0b91b4e8fd74bcb256a19d188c83470a7b75a4897babb252e54b6eb8f8bb392d"
 _DOMAIN_SALT: Final[bytes] = bytes.fromhex(DOMAIN_SALT_HEX)
 
@@ -264,6 +266,7 @@ MAX_PUBLIC_HEX_CHARS: Final[int] = HEX_CHARS
 _MAX_PUBLIC_HEX_CHARS: Final[int] = HEX_CHARS
 _MAX_DECIMAL_ID_STRING_CHARS: Final[int] = 32
 _MAX_CONFIG_FILE_BYTES: Final[int] = 2000
+_MAX_PEPPER_FILE_BYTES: Final[int] = MAX_PEPPER_HEX_CHARS + 128
 
 _CONFIG_LOCK = RLock()
 _PEPPER_FILE_LOCATION: str = DEFAULT_PEPPER_FILE_LOCATION
@@ -611,6 +614,7 @@ def _config_from_loaded_data(data: object) -> dict[str, object]:
 
 def _candidate_config_paths(path: Path) -> tuple[Path, ...]:
     """Return existing same-stem .json/.yaml/.yml config files for comparison."""
+    path = path.expanduser()
     suffix = path.suffix.lower()
     if suffix not in {".json", ".yaml", ".yml"}:
         raise ValueError("config file must use .json, .yaml, or .yml")
@@ -627,13 +631,15 @@ def _candidate_config_paths(path: Path) -> tuple[Path, ...]:
 
 def _config_file_cache_key(path: Path) -> Path:
     """Return the same cache key for same-stem .json/.yaml/.yml config files."""
+    path = path.expanduser()
     if path.suffix.lower() not in {".json", ".yaml", ".yml"}:
         raise ValueError("config file must use .json, .yaml, or .yml")
-    return path.expanduser().resolve().with_suffix("")
+    return path.resolve().with_suffix("")
 
 
 def _load_one_config_file(path: Path) -> dict[str, object]:
     """Load one config file, enforce size, and return a normalized mapping."""
+    path = path.expanduser()
     suffix = path.suffix.lower()
     try:
         with path.open("rb") as file_obj:
@@ -690,7 +696,7 @@ def load_sql_id_config_from_file(path: str | os.PathLike[str]) -> None:
     config. Use reload_sql_id_config_from_file() when application logic
     intentionally wants to re-read config files from disk.
     """
-    config_path = Path(path)
+    config_path = Path(path).expanduser()
     cache_key = _config_file_cache_key(config_path)
     with _CONFIG_LOCK:
         cached_config = _CONFIG_FILE_CACHE.get(cache_key)
@@ -703,7 +709,7 @@ def load_sql_id_config_from_file(path: str | os.PathLike[str]) -> None:
 
 def reload_sql_id_config_from_file(path: str | os.PathLike[str]) -> None:
     """Re-read same-stem config files, refresh the cache, and configure them."""
-    config_path = Path(path)
+    config_path = Path(path).expanduser()
     cache_key = _config_file_cache_key(config_path)
     loaded_config = _load_sql_id_config_files_uncached(config_path)
     cached_config = MappingProxyType(dict(loaded_config))
@@ -762,15 +768,8 @@ def _configured_pepper_path() -> Path:
     return Path(location).expanduser()
 
 
-def _validate_pepper_permissions(path: Path) -> None:
+def _validate_pepper_permissions(path: Path, file_stat: os.stat_result) -> None:
     """Reject pepper files with permissions that expose or mutate key material."""
-    try:
-        file_stat = path.stat()
-    except FileNotFoundError as exc:
-        raise _ConfigError("missing_pepper_file", f"pepper file does not exist: {path}") from exc
-    except OSError as exc:
-        raise _ConfigError("unreadable_pepper_file", f"could not stat pepper file: {exc}") from exc
-
     if not stat.S_ISREG(file_stat.st_mode):
         raise _ConfigError("bad_pepper_file", f"pepper path is not a regular file: {path}")
 
@@ -788,15 +787,59 @@ def _validate_pepper_permissions(path: Path) -> None:
         raise _ConfigError("bad_pepper_permissions", "pepper file must be readable by owner or group")
 
 
+def _open_pepper_fd(path: Path) -> int:
+    """Open the pepper file without following symlinks on POSIX platforms."""
+    flags = os.O_RDONLY
+    if os.name == "posix":
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        try:
+            if stat.S_ISLNK(path.lstat().st_mode):
+                raise _ConfigError("bad_pepper_file", f"pepper path must not be a symlink: {path}")
+        except FileNotFoundError as exc:
+            raise _ConfigError("missing_pepper_file", f"pepper file does not exist: {path}") from exc
+        except _ConfigError:
+            raise
+        except OSError as exc:
+            raise _ConfigError("unreadable_pepper_file", f"could not stat pepper file: {exc}") from exc
+
+    try:
+        return os.open(path, flags)
+    except FileNotFoundError as exc:
+        raise _ConfigError("missing_pepper_file", f"pepper file does not exist: {path}") from exc
+    except OSError as exc:
+        if exc.errno == errno.ELOOP:
+            raise _ConfigError("bad_pepper_file", f"pepper path must not be a symlink: {path}") from exc
+        raise _ConfigError("unreadable_pepper_file", f"could not open pepper file: {exc}") from exc
+
+
 def _read_pepper_bytes_from_path(path: Path) -> bytes:
     """Read and validate pepper bytes from one already-selected path."""
-    _validate_pepper_permissions(path)
+    fd = _open_pepper_fd(path)
     try:
-        text = path.read_text(encoding="ascii").strip()
+        try:
+            file_stat = os.fstat(fd)
+        except OSError as exc:
+            raise _ConfigError("unreadable_pepper_file", f"could not stat pepper file: {exc}") from exc
+        _validate_pepper_permissions(path, file_stat)
+        if file_stat.st_size > _MAX_PEPPER_FILE_BYTES:
+            raise _ConfigError("pepper_too_long", f"pepper file must be at most {_MAX_PEPPER_FILE_BYTES} bytes")
+
+        try:
+            raw_data = os.read(fd, _MAX_PEPPER_FILE_BYTES + 1)
+        except OSError as exc:
+            raise _ConfigError("unreadable_pepper_file", f"could not read pepper file: {exc}") from exc
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+    if len(raw_data) > _MAX_PEPPER_FILE_BYTES:
+        raise _ConfigError("pepper_too_long", f"pepper file must be at most {_MAX_PEPPER_FILE_BYTES} bytes")
+    try:
+        text = raw_data.decode("ascii").strip()
     except UnicodeDecodeError as exc:
         raise _ConfigError("invalid_pepper_hex", f"pepper file must contain ASCII hex: {exc}") from exc
-    except OSError as exc:
-        raise _ConfigError("unreadable_pepper_file", f"could not read pepper file: {exc}") from exc
 
     if len(text) < MIN_PEPPER_HEX_CHARS:
         raise _ConfigError("pepper_too_short", f"pepper hex must be at least {MIN_PEPPER_HEX_CHARS} characters")

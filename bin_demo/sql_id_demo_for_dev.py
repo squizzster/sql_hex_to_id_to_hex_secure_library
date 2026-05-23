@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import stat
 import sys
 from collections.abc import Sequence
 from pathlib import Path
@@ -107,23 +108,52 @@ def ensure_demo_config(*, strict: bool) -> None:
             file=sys.stderr,
         )
 
-    try:
-        if DEMO_PEPPER_PATH.exists():
-            DEMO_PEPPER_PATH.chmod(0o600)
-        DEMO_PEPPER_PATH.write_text(DEMO_HARD_CODED_PEPPER_HEX + "\n", encoding="ascii")
-        DEMO_PEPPER_PATH.chmod(0o400)
-        configure_sql_id({"pepper_file_location": str(DEMO_PEPPER_PATH)})
-        USING_DEMO_HARD_CODED_PEPPER = True
-        print(
-            f"Using demo pepper file at {DEMO_PEPPER_PATH}. "
-            f"Real applications should create {DEFAULT_PEPPER_FILE_LOCATION} with chmod 0400.",
-            file=sys.stderr,
-        )
-    except OSError as exc:
-        raise SystemExit(f"could not create demo pepper file: {exc}") from exc
+    ensure_demo_pepper_file()
+    configure_sql_id({"pepper_file_location": str(DEMO_PEPPER_PATH)})
+    USING_DEMO_HARD_CODED_PEPPER = True
+    print(
+        f"Using demo pepper file at {DEMO_PEPPER_PATH}. "
+        f"Real applications should create {DEFAULT_PEPPER_FILE_LOCATION} with chmod 0400.",
+        file=sys.stderr,
+    )
 
     if not is_configured():
         raise SystemExit("demo configuration is still invalid after creating demo password and pepper")
+
+
+def ensure_demo_pepper_file() -> None:
+    """Create the demo pepper once without following symlinks or clobbering."""
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if os.name == "posix":
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+
+    try:
+        fd = os.open(DEMO_PEPPER_PATH, flags, 0o400)
+    except FileExistsError:
+        if os.name == "posix":
+            try:
+                file_stat = DEMO_PEPPER_PATH.lstat()
+            except OSError as exc:
+                raise SystemExit(f"could not inspect existing demo pepper file: {exc}") from exc
+            if stat.S_ISLNK(file_stat.st_mode):
+                raise SystemExit(f"demo pepper path is a symlink; delete it first: {DEMO_PEPPER_PATH}")
+            if hasattr(os, "geteuid") and file_stat.st_uid != os.geteuid():
+                raise SystemExit(f"demo pepper path is not owned by this user; delete it first: {DEMO_PEPPER_PATH}")
+        return
+    except OSError as exc:
+        raise SystemExit(f"could not create demo pepper file: {exc}") from exc
+
+    try:
+        payload = (DEMO_HARD_CODED_PEPPER_HEX + "\n").encode("ascii")
+        if os.write(fd, payload) != len(payload):
+            raise SystemExit(f"could not fully write demo pepper file: {DEMO_PEPPER_PATH}")
+        if hasattr(os, "fchmod"):
+            os.fchmod(fd, 0o400)
+    finally:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
 
 
 def parse_label(value: str | None) -> str | int | None:
