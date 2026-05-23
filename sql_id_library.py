@@ -1,9 +1,9 @@
-"""Reversible 32-hex-character public IDs for SQL BIGINT integer keys.
+"""Reversible 32-hex-character public IDs for SQL BIGINT keys.
 
-This module turns a positive SQL integer ID, with optional label bits, into a
+This module turns a positive SQL BIGINT ID, with optional label bits, into a
 deterministic public hex ID. It turns a valid public hex ID back into the
-original integer only through the exact expected-label decoder. The public ID is
-always 32 lowercase hex characters:
+original BIGINT value only through the exact expected-label decoder. The public
+ID is always 32 lowercase hex characters:
 
     3 version bits + 5 label bits + 1 range bit + id bits + keyed tag bits
     = 128 bits
@@ -29,7 +29,7 @@ ID for one label cannot be decoded by asking for another label.
 
 Security model:
 
-    This is a deterministic public-handle layer for internal SQL integer IDs. It
+    This is a deterministic public-handle layer for internal SQL BIGINT IDs. It
     hides sequential IDs and rejects almost all random/tampered inputs. It is not
     a bearer token, authentication system, authorization system, or proof of
     permission. Always check decoded IDs against normal application permissions
@@ -131,8 +131,9 @@ TOTAL_BITS: Final[int] = 128
 HEX_CHARS: Final[int] = 32
 SMALL_TAG_BITS: Final[int] = TOTAL_BITS - VERSION_BITS - LABEL_BITS - RANGE_BITS - SMALL_ID_BITS
 BIGINT_TAG_BITS: Final[int] = TOTAL_BITS - VERSION_BITS - LABEL_BITS - RANGE_BITS - BIGINT_ID_BITS
-ID_BITS: Final[int] = BIGINT_ID_BITS
-TAG_BITS: Final[int] = BIGINT_TAG_BITS
+MAX_ID_BITS: Final[int] = BIGINT_ID_BITS
+MIN_TAG_BITS: Final[int] = BIGINT_TAG_BITS
+MAX_TAG_BITS: Final[int] = SMALL_TAG_BITS
 
 ISSUE_VERSION: Final[int] = 2
 NO_LABEL: Final[int] = 0
@@ -158,7 +159,7 @@ SUPPORTED_HEX_LENGTHS: Final[tuple[int, ...]] = (HEX_CHARS,)
 #
 # Generate this independently from XCTX_ID_PASSWORD and the pepper file.
 # Changing any of those values after issuing public IDs intentionally creates a
-# new scheme and breaks old IDs.
+# new scheme and breaks previously issued IDs.
 DOMAIN_SALT_HEX: Final[str] = "0b91b4e8fd74bcb256a19d188c83470a7b75a4897babb252e54b6eb8f8bb392d"
 _DOMAIN_SALT: Final[bytes] = bytes.fromhex(DOMAIN_SALT_HEX)
 
@@ -385,19 +386,21 @@ __all__ = [
     "BIGINT_RANGE_LAYOUT",
     "BIGINT_RANGE_MIN_ID",
     "BIGINT_TAG_BITS",
-    "ID_BITS",
     "ISSUE_VERSION",
     "LABEL_BITS",
     "LABELS_CONFIG_KEY",
     "LAYOUT",
     "MAX_ID",
+    "MAX_ID_BITS",
     "MAX_LABEL",
     "MAX_PEPPER_BYTES",
     "MAX_PEPPER_HEX_CHARS",
+    "MAX_TAG_BITS",
     "MIN_ID",
     "MIN_PEPPER_BYTES",
     "MIN_PEPPER_HEX_CHARS",
     "MIN_PASSWORD_BYTES",
+    "MIN_TAG_BITS",
     "MYSQL_UNSIGNED_BIGINT_MAX",
     "NO_LABEL",
     "PEPPER_FILE_LOCATION_KEY",
@@ -415,7 +418,6 @@ __all__ = [
     "SqlIdLayout",
     "SqlIdRangeLayout",
     "SqlIdValidation",
-    "TAG_BITS",
     "TOTAL_BITS",
     "VERSION_BITS",
     "available_labels",
@@ -476,7 +478,9 @@ def _registry_is_sane() -> bool:
         return False
     if SMALL_ID_BITS != 32 or BIGINT_ID_BITS != 64:
         return False
-    if ID_BITS != BIGINT_ID_BITS or TAG_BITS != BIGINT_TAG_BITS:
+    if MAX_ID_BITS != BIGINT_ID_BITS:
+        return False
+    if MIN_TAG_BITS != BIGINT_TAG_BITS or MAX_TAG_BITS != SMALL_TAG_BITS:
         return False
     if SMALL_TAG_BITS != 87 or BIGINT_TAG_BITS != 55:
         return False
@@ -1442,9 +1446,16 @@ def sql_decode_id_label(value: object, label: object) -> int | None:
     return hex_to_id_label(value, label)
 
 
-def hex_to_parts(value: object) -> tuple[int, str | None, int, int] | None:
-    """Return (label_id, label_name, version, integer_id) for any valid non-reserved label."""
+def hex_to_parts(value: object) -> tuple[int, str | None, int, int, int, int] | None:
+    """Return (label_id, label_name, range_class, tag_bits, version, integer_id)."""
     result = inspect_hex(value)
-    if not result.ok or result.id is None or result.label_id is None or result.version is None:
+    if (
+        not result.ok
+        or result.id is None
+        or result.label_id is None
+        or result.range_class is None
+        or result.tag_bits is None
+        or result.version is None
+    ):
         return None
-    return result.label_id, result.label, result.version, result.id
+    return result.label_id, result.label, result.range_class, result.tag_bits, result.version, result.id

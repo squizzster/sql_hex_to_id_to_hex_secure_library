@@ -1,6 +1,6 @@
-# SQL integers inside. Public hex outside.
+# SQL BIGINTs inside. Public hex outside.
 
-`sql_id_library` keeps your database on compact integer primary keys while the
+`sql_id_library` keeps your database on compact BIGINT primary keys while the
 outside world sees deterministic, secret-keyed, reversible public handles.
 
 ```python
@@ -293,6 +293,12 @@ error_code
 error
 ```
 
+`hex_to_parts(public_hex)` returns:
+
+```text
+(label_id, label_name, range_class, tag_bits, version, integer_id)
+```
+
 Typical errors include:
 
 | Code                  | Meaning                                 |
@@ -358,6 +364,10 @@ That is just under:
 ```text
 1 in 2^64
 ```
+
+That overall probability is across the full BIGINT ID space. For a specific
+small-range ID such as `1`, the keyed tag check uses `87` tag bits; the
+large-range path uses `55` tag bits.
 
 The strict APIs enforce one expected label:
 

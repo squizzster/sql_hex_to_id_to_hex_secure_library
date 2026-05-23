@@ -44,7 +44,7 @@ from sql_id_library import (  # noqa: E402 - demo config is set before first pro
     BIGINT_RANGE_CLASS,
     BIGINT_RANGE_MIN_ID,
     BIGINT_TAG_BITS,
-    ID_BITS,
+    MAX_ID_BITS,
     ISSUE_VERSION,
     LABEL_BITS,
     MAX_ID,
@@ -195,8 +195,8 @@ def build_parser() -> argparse.ArgumentParser:
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     action = parser.add_mutually_exclusive_group()
-    action.add_argument("--int_id", type=int, help="encode this positive SQL integer ID and print public hex")
-    action.add_argument("--hex_id", help="strictly decode this public hex ID and print the SQL integer ID")
+    action.add_argument("--int_id", type=int, help="encode this positive SQL BIGINT ID and print public hex")
+    action.add_argument("--hex_id", help="strictly decode this public hex ID and print the SQL BIGINT ID")
     parser.add_argument("--label", help="label name or numeric label id to encode with, or to require when decoding")
     parser.add_argument("--config-file", help="configure labels and/or pepper path from this .json, .yaml, or .yml file")
     parser.add_argument(
@@ -285,7 +285,7 @@ def show_default_demo() -> None:
         f"range bits:   {RANGE_BITS} "
         f"({SMALL_RANGE_CLASS}=32-bit ID field, {BIGINT_RANGE_CLASS}=64-bit ID field)"
     )
-    print(f"id bits:      up to {ID_BITS} (SQL IDs 1..{MAX_ID:,})")
+    print(f"id bits:      up to {MAX_ID_BITS} (SQL BIGINT IDs 1..{MAX_ID:,})")
     print(
         f"tag bits:     {SMALL_TAG_BITS} for IDs 1..{SMALL_RANGE_MAX_ID:,}; "
         f"{BIGINT_TAG_BITS} for IDs {BIGINT_RANGE_MIN_ID:,}..{MAX_ID:,}"

@@ -2,8 +2,8 @@
 
 ## What This Library Does
 
-This library maps a positive SQL BIGINT integer ID to a public hex handle and
-back again:
+This library maps a positive SQL BIGINT ID to a public hex handle and back
+again:
 
 ```text
 SQL BIGINT + label -> layout pack with keyed tag -> secret-keyed Feistel permutation -> lowercase hex
@@ -164,6 +164,10 @@ So the probability is just under:
 2^-64
 ```
 
+That is the overall acceptance probability across the full BIGINT ID space. For
+a specific small-range ID, the keyed tag has 87 bits; for a specific large-range
+ID, the keyed tag has 55 bits.
+
 This applies to both:
 
 ```text
@@ -251,6 +255,7 @@ For bearer-token uses, generate independent random tokens of at least 128 bits.
 - `validate_hex()` validates only label `0`.
 - `validate_hex_label()` validates only one expected label.
 - `inspect_hex()` returns diagnostic metadata for any non-reserved label.
+- `hex_to_parts()` returns `(label_id, label_name, range_class, tag_bits, version, integer_id)` for diagnostics.
 - `configure_sql_id()` validates the pepper path and/or full local label registry before atomically replacing configured values.
 - `load_sql_id_config_from_file()` automatically reuses cached `.json`, `.yaml`, or `.yml` config mappings after the first successful load for a same-stem path.
 - Encoding and decoding use the in-memory config path and label registry; normal ID operations read and cache the configured pepper file but do not read config files.

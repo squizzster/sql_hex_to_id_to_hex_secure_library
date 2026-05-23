@@ -93,10 +93,11 @@ class SqlIdLibraryTests(unittest.TestCase):
         self.assertEqual(sid.RANGE_BITS, 1)
         self.assertEqual(sid.SMALL_ID_BITS, 32)
         self.assertEqual(sid.BIGINT_ID_BITS, 64)
-        self.assertEqual(sid.ID_BITS, 64)
+        self.assertEqual(sid.MAX_ID_BITS, 64)
         self.assertEqual(sid.SMALL_TAG_BITS, 87)
         self.assertEqual(sid.BIGINT_TAG_BITS, 55)
-        self.assertEqual(sid.TAG_BITS, 55)
+        self.assertEqual(sid.MIN_TAG_BITS, 55)
+        self.assertEqual(sid.MAX_TAG_BITS, 87)
         self.assertEqual(sid.TOTAL_BITS, 128)
         self.assertEqual(sid.HEX_CHARS, 32)
         self.assertEqual(sid.SUPPORTED_HEX_LENGTHS, (32,))
@@ -183,7 +184,17 @@ class SqlIdLibraryTests(unittest.TestCase):
                 self.assertEqual(result.version, sid.ISSUE_VERSION)
                 self.assertIsNone(result.error)
                 self.assertIsNone(result.error_code)
-                self.assertEqual(sid.hex_to_parts(encoded), (sid.NO_LABEL, None, sid.ISSUE_VERSION, expected))
+                self.assertEqual(
+                    sid.hex_to_parts(encoded),
+                    (
+                        sid.NO_LABEL,
+                        None,
+                        sid.SMALL_RANGE_CLASS if expected <= sid.SMALL_RANGE_MAX_ID else sid.BIGINT_RANGE_CLASS,
+                        sid.SMALL_TAG_BITS if expected <= sid.SMALL_RANGE_MAX_ID else sid.BIGINT_TAG_BITS,
+                        sid.ISSUE_VERSION,
+                        expected,
+                    ),
+                )
 
     def test_range_classes_are_canonical_and_use_expected_tag_space(self) -> None:
         round_keys, _tag_key = sid._key_material()
@@ -900,7 +911,7 @@ class SqlIdLibraryTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             sid._tag(sid.ISSUE_VERSION, 0, 2, 1, tag_key)
         with self.assertRaises(ValueError):
-            sid._tag(sid.ISSUE_VERSION, 0, sid.BIGINT_RANGE_CLASS, 1 << sid.ID_BITS, tag_key)
+            sid._tag(sid.ISSUE_VERSION, 0, sid.BIGINT_RANGE_CLASS, 1 << sid.BIGINT_ID_BITS, tag_key)
         with self.assertRaises(ValueError):
             sid._feistel_encrypt(-1, round_keys)
         with self.assertRaises(ValueError):
